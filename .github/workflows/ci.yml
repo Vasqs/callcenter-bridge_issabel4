@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Lint PHP
+        run: find web -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Run module tests
+        run: python -m unittest tests/test_callcenter_bridge_module.py
