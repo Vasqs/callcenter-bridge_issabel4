@@ -1,4 +1,5 @@
 import json
+import tempfile
 import subprocess
 import textwrap
 import unittest
@@ -22,7 +23,10 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
     def test_callcenter_bridge_module_contract_exists(self) -> None:
         expected_paths = [
             MODULE_ROOT / "README.md",
+            MODULE_ROOT / "web" / "index.php",
+            MODULE_ROOT / "web" / "menu.xml",
             MODULE_ROOT / "web" / "api.php",
+            MODULE_ROOT / "web" / "lib" / "CallCenterConfigPage.php",
             MODULE_ROOT / "web" / "lib" / "CallCenterApiRouter.php",
             MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php",
             MODULE_ROOT / "web" / "lib" / "CallCenterService.php",
@@ -40,6 +44,89 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertNotIn("icesupport=yes", apply_hook)
         self.assertNotIn("transport=udp,ws,wss", apply_hook)
         self.assertIn("remove_legacy_webrtc_block", apply_hook)
+        self.assertIn("sqlite3 /var/www/db/menu.db", apply_hook)
+        self.assertIn("callcenter_bridge", apply_hook)
+        self.assertIn("DELETE FROM menu WHERE id='callcenter_bridge'", apply_hook)
+        self.assertIn("INSERT INTO menu", apply_hook)
+        self.assertIn("WHERE NOT EXISTS", apply_hook)
+        self.assertIn("sqlite3 /var/www/db/acl.db", apply_hook)
+        self.assertIn("INSERT INTO acl_resource", apply_hook)
+        self.assertIn("INSERT INTO acl_group_permission", apply_hook)
+
+    def test_callcenter_bridge_menu_exposes_admin_entry(self) -> None:
+        menu_xml = (MODULE_ROOT / "web" / "menu.xml").read_text()
+
+        self.assertIn("<item id=\"callcenter_bridge\">", menu_xml)
+        self.assertIn("<type>module</type>", menu_xml)
+        self.assertIn("<id_parent>pbxconfig</id_parent>", menu_xml)
+        self.assertIn("<resource id=\"callcenter_bridge\">", menu_xml)
+
+    def test_callcenter_bridge_index_uses_same_env_candidates_as_api(self) -> None:
+        index_php = (MODULE_ROOT / "web" / "index.php").read_text()
+
+        self.assertIn("__DIR__ . '/module.env'", index_php)
+        self.assertIn("/workspace/modules/callcenter_bridge/module.env", index_php)
+        self.assertNotIn("dirname(__DIR__)", index_php)
+
+    def test_callcenter_bridge_config_page_loads_defaults_and_persists_env(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterConfigPage.php")!r};
+
+            $tmpDir = sys_get_temp_dir() . '/callcenter-bridge-config-' . bin2hex(random_bytes(4));
+            mkdir($tmpDir, 0777, true);
+            $examplePath = $tmpDir . '/module.env.example';
+            $envPath = $tmpDir . '/module.env';
+
+            file_put_contents($examplePath, implode("\n", [
+                'CALLCENTER_BRIDGE_API_TOKEN=change-me',
+                'CALLCENTER_BRIDGE_PANEL_WEBHOOK_URL=',
+                'CALLCENTER_BRIDGE_PANEL_WEBHOOK_TOKEN=',
+                'CALLCENTER_BRIDGE_HTTP_TIMEOUT=10',
+                '',
+            ]));
+
+            file_put_contents($envPath, implode("\n", [
+                'CALLCENTER_BRIDGE_API_TOKEN=existing-token',
+                'CALLCENTER_BRIDGE_HTTP_TIMEOUT=15',
+                'CALLCENTER_BRIDGE_EXTRA_FLAG=keep-me',
+                '',
+            ]));
+
+            $loaded = CallCenterConfigPage::loadConfig($envPath, $examplePath);
+            CallCenterConfigPage::saveConfig(
+                $envPath,
+                $examplePath,
+                [
+                    'CALLCENTER_BRIDGE_API_TOKEN' => 'updated-token',
+                    'CALLCENTER_BRIDGE_PANEL_WEBHOOK_URL' => 'https://painel.local/webhook',
+                    'CALLCENTER_BRIDGE_PANEL_WEBHOOK_TOKEN' => 'panel-secret',
+                    'CALLCENTER_BRIDGE_HTTP_TIMEOUT' => '25',
+                ]
+            );
+
+            echo json_encode([
+                'loaded' => $loaded,
+                'saved' => CallCenterConfigPage::parseEnvFile($envPath),
+                'raw' => file_get_contents($envPath),
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["loaded"]["CALLCENTER_BRIDGE_API_TOKEN"], "existing-token")
+        self.assertEqual(payload["loaded"]["CALLCENTER_BRIDGE_PANEL_WEBHOOK_URL"], "")
+        self.assertEqual(payload["loaded"]["CALLCENTER_BRIDGE_HTTP_TIMEOUT"], "15")
+        self.assertEqual(payload["saved"]["CALLCENTER_BRIDGE_API_TOKEN"], "updated-token")
+        self.assertEqual(payload["saved"]["CALLCENTER_BRIDGE_PANEL_WEBHOOK_URL"], "https://painel.local/webhook")
+        self.assertEqual(payload["saved"]["CALLCENTER_BRIDGE_PANEL_WEBHOOK_TOKEN"], "panel-secret")
+        self.assertEqual(payload["saved"]["CALLCENTER_BRIDGE_HTTP_TIMEOUT"], "25")
+        self.assertEqual(payload["saved"]["CALLCENTER_BRIDGE_EXTRA_FLAG"], "keep-me")
+        self.assertIn("CALLCENTER_BRIDGE_EXTRA_FLAG=keep-me", payload["raw"])
 
     def test_callcenter_bridge_router_resolves_expected_routes(self) -> None:
         script = textwrap.dedent(
