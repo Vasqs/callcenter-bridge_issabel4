@@ -6,6 +6,7 @@ MODULE_STATE_DIR="${STATE_ROOT%/}/callcenter_bridge"
 ASTERISK_CUSTOM_POST="/etc/asterisk/sip_custom_post.conf"
 LEGACY_BEGIN='; BEGIN callcenter_bridge webrtc'
 LEGACY_END='; END callcenter_bridge webrtc'
+MODULE_CANONICAL_NAME="callcenter_bridge"
 
 remove_legacy_webrtc_block() {
   local target_file="$1"
@@ -24,6 +25,36 @@ remove_legacy_webrtc_block() {
   rm -f "$tmp_file"
 }
 
+ensure_module_alias() {
+  local actual_module_dir
+  local actual_module_name
+  local modules_parent_dir
+  local alias_path
+  local alias_target
+
+  actual_module_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  actual_module_name="$(basename "$actual_module_dir")"
+  modules_parent_dir="$(dirname "$actual_module_dir")"
+  alias_path="${modules_parent_dir}/${MODULE_CANONICAL_NAME}"
+
+  if [ "$actual_module_name" = "$MODULE_CANONICAL_NAME" ]; then
+    return 0
+  fi
+
+  if [ -L "$alias_path" ]; then
+    alias_target="$(readlink "$alias_path" || true)"
+    if [ "$alias_target" != "$actual_module_name" ]; then
+      rm -f "$alias_path"
+      ln -s "$actual_module_name" "$alias_path"
+    fi
+    return 0
+  fi
+
+  if [ ! -e "$alias_path" ]; then
+    ln -s "$actual_module_name" "$alias_path"
+  fi
+}
+
 mkdir -p "$MODULE_STATE_DIR"
 touch "$MODULE_STATE_DIR/agent_extensions.json"
 touch "$MODULE_STATE_DIR/last_snapshot.json"
@@ -32,6 +63,7 @@ chmod 775 "$MODULE_STATE_DIR" 2>/dev/null || true
 chmod 664 "$MODULE_STATE_DIR/agent_extensions.json" "$MODULE_STATE_DIR/last_snapshot.json" 2>/dev/null || true
 chown -R asterisk:asterisk "$MODULE_STATE_DIR" 2>/dev/null || true
 
+ensure_module_alias
 remove_legacy_webrtc_block "$ASTERISK_CUSTOM_POST"
 asterisk -rx 'sip reload' >/dev/null 2>&1 || true
 
