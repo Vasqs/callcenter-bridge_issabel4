@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<menu>
+    <menucache>
+        <item id="callcenter_bridge">
+            <description>Callcenter Bridge</description>
+            <type>module</type>
+            <id_parent>pbxconfig</id_parent>
+            <link></link>
+            <order_no>98</order_no>
+        </item>
+    </menucache>
+    <permissions>
+        <group id="1">
+            <resource id="callcenter_bridge">
+                <description>Callcenter Bridge</description>
+                <action>1</action>
+            </resource>
+        </group>
+    </permissions>
+</menu>
