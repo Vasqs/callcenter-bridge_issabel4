@@ -23,6 +23,9 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
     def test_callcenter_bridge_module_contract_exists(self) -> None:
         expected_paths = [
             MODULE_ROOT / "README.md",
+            MODULE_ROOT / "index.php",
+            MODULE_ROOT / "api.php",
+            MODULE_ROOT / "menu.xml",
             MODULE_ROOT / "web" / "index.php",
             MODULE_ROOT / "web" / "menu.xml",
             MODULE_ROOT / "web" / "api.php",
@@ -52,6 +55,17 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertIn("sqlite3 /var/www/db/acl.db", apply_hook)
         self.assertIn("INSERT INTO acl_resource", apply_hook)
         self.assertIn("INSERT INTO acl_group_permission", apply_hook)
+        self.assertIn("ln -s", apply_hook)
+        self.assertIn("callcenter_bridge", apply_hook)
+
+    def test_standalone_entrypoints_wrap_web_payload(self) -> None:
+        root_index = (MODULE_ROOT / "index.php").read_text()
+        root_api = (MODULE_ROOT / "api.php").read_text()
+        root_menu = (MODULE_ROOT / "menu.xml").read_text()
+
+        self.assertIn("__DIR__ . '/web/index.php'", root_index)
+        self.assertIn("__DIR__ . '/web/api.php'", root_api)
+        self.assertIn("<item id=\"callcenter_bridge\">", root_menu)
 
     def test_callcenter_bridge_menu_exposes_admin_entry(self) -> None:
         menu_xml = (MODULE_ROOT / "web" / "menu.xml").read_text()
