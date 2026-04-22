@@ -88,6 +88,19 @@ if (is_string($rawInput) && trim($rawInput) !== '') {
     }
 }
 
+foreach ($_GET as $key => $value) {
+    if ($key === 'route' || $key === 'token') {
+        continue;
+    }
+
+    if (is_array($value)) {
+        $payload[$key] = $value;
+        continue;
+    }
+
+    $payload[$key] = (string) $value;
+}
+
 $router = new CallCenterApiRouter();
 $match = $router->match($method, $route);
 

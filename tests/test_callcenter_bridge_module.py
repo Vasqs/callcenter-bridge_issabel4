@@ -35,6 +35,10 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
             MODULE_ROOT / "web" / "lib" / "CallCenterService.php",
             MODULE_ROOT / "hooks" / "apply.sh",
             MODULE_ROOT / "module.env.example",
+            MODULE_ROOT / "deploy" / "systemd" / "callcenter-bridge-relay.service",
+            MODULE_ROOT / "deploy" / "systemd" / "callcenter-bridge-relay.timer",
+            MODULE_ROOT / "deploy" / "systemd" / "callcenter-bridge-relay.sh.example",
+            MODULE_ROOT / "scripts" / "install-callcenter-bridge-relay.sh",
         ]
 
         for path in expected_paths:
@@ -155,6 +159,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 ['GET', '/v1/queues'],
                 ['GET', '/v1/calls/active'],
                 ['GET', '/v1/agents/Agent%2F1/status'],
+                ['GET', '/v1/agents/Agent%2F1/campaign-context'],
                 ['POST', '/v1/agents/Agent%2F1/login'],
                 ['POST', '/v1/agents/Agent%2F1/logout'],
                 ['POST', '/v1/agents/Agent%2F1/pause'],
@@ -186,6 +191,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 "queues.list",
                 "calls.active",
                 "agents.status",
+                "agents.campaign_context",
                 "agents.login",
                 "agents.logout",
                 "agents.pause",
@@ -197,7 +203,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
             ],
         )
         self.assertEqual(resolved[4]["params"]["agentId"], "Agent/1")
-        self.assertEqual(resolved[11]["params"]["callId"], "call-001")
+        self.assertEqual(resolved[12]["params"]["callId"], "call-001")
 
     def test_callcenter_bridge_snapshot_differ_emits_normalized_events(self) -> None:
         script = textwrap.dedent(
@@ -249,6 +255,30 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
 
         hangup_event = next(event for event in events if event["event_type"] == "call.hangup")
         self.assertEqual(hangup_event["call_id"], "old-call")
+
+    def test_callcenter_bridge_relay_installer_contract_exists(self) -> None:
+        install_script = MODULE_ROOT / "scripts" / "install-callcenter-bridge-relay.sh"
+        service_unit = MODULE_ROOT / "deploy" / "systemd" / "callcenter-bridge-relay.service"
+        timer_unit = MODULE_ROOT / "deploy" / "systemd" / "callcenter-bridge-relay.timer"
+        relay_script_example = MODULE_ROOT / "deploy" / "systemd" / "callcenter-bridge-relay.sh.example"
+
+        install_text = install_script.read_text()
+        service_text = service_unit.read_text()
+        timer_text = timer_unit.read_text()
+        relay_text = relay_script_example.read_text()
+
+        self.assertIn("callcenter-bridge-relay.service", install_text)
+        self.assertIn("callcenter-bridge-relay.timer", install_text)
+        self.assertIn("callcenter-bridge-relay.sh", install_text)
+        self.assertIn("systemctl enable --now callcenter-bridge-relay.timer", install_text)
+
+        self.assertIn("ExecStart=/usr/local/bin/callcenter-bridge-relay.sh", service_text)
+        self.assertIn("OnUnitActiveSec=1s", timer_text)
+        self.assertIn("callcenter-bridge-relay.service", timer_text)
+        self.assertIn("CALLCENTER_BRIDGE_MODULE_ENV_PATH", relay_text)
+        self.assertIn("CALLCENTER_BRIDGE_LOCAL_RELAY_URL", relay_text)
+        self.assertIn("/modules/callcenter_bridge/api.php/v1/events/relay", relay_text)
+        self.assertIn("CALLCENTER_BRIDGE_API_TOKEN", relay_text)
 
     def test_callcenter_bridge_snapshot_differ_adds_event_and_remote_number_aliases(self) -> None:
         script = textwrap.dedent(
@@ -674,6 +704,146 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
             ["loginAgent", "originateCall", "hangupAgentCall"],
         )
         self.assertEqual(payload["runtime_calls"][1]["extension"], "1001")
+
+    def test_callcenter_bridge_service_returns_structured_campaign_context(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForCampaignContextTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+                public function resolveAgentReference($reference) {{
+                    return ['agent_id' => 'Agent/99', 'route_key' => '99'];
+                }}
+                public function getAgentCampaignContext($agentId, array $options = array()) {{
+                    return [
+                        'agent_id' => $agentId,
+                        'extension' => '1001',
+                        'call_id' => 'call-ctx-001',
+                        'campaign_id' => '2',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'identifier_type' => $options['identifier_type'],
+                        'identifier_value' => '12345678909',
+                        'source' => 'issabel-callcenter-bridge',
+                        'resolved_from' => 'call_attribute',
+                    ];
+                }}
+            }}
+
+            class FakeStoreForCampaignContextTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+            }}
+
+            $service = new CallCenterService(new FakeRuntimeForCampaignContextTest(), new FakeStoreForCampaignContextTest());
+            $response = $service->handle('agents.campaign_context', ['agentId' => '99'], [
+                'identifier_type' => 'cpf',
+                'attribute_column' => 2,
+            ]);
+
+            echo json_encode($response, JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["agent_id"], "Agent/99")
+        self.assertEqual(payload["context"]["call_id"], "call-ctx-001")
+        self.assertEqual(payload["context"]["identifier_type"], "cpf")
+        self.assertEqual(payload["context"]["identifier_value"], "12345678909")
+
+    def test_callcenter_bridge_relay_enriches_focus_events_with_campaign_context(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForRelayCampaignTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+                public function buildSnapshot($store) {{ return ['agents' => [], 'calls' => []]; }}
+                public function getAgentCampaignContext($agentId, array $options = array()) {{
+                    return [
+                        'agent_id' => $agentId,
+                        'extension' => '1001',
+                        'call_id' => 'call-focus-001',
+                        'campaign_id' => '2',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'identifier_type' => 'cpf',
+                        'identifier_value' => '12345678909',
+                        'source' => 'issabel-callcenter-bridge',
+                        'resolved_from' => 'call_attribute',
+                    ];
+                }}
+            }}
+
+            class FakeStoreForRelayCampaignTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public function readLastSnapshot() {{ return ['agents' => [], 'calls' => []]; }}
+                public function writeLastSnapshot($snapshot) {{ return null; }}
+                public function readFocusedCallIds() {{ return []; }}
+                public function writeFocusedCallIds($snapshot) {{ return null; }}
+            }}
+
+            class FakeDifferForRelayCampaignTest extends CallCenterSnapshotDiffer {{
+                public function __construct() {{}}
+                public function diff($previous, $current, $companyKey, $previousFocusedCalls = array(), &$nextFocusedCalls = null) {{
+                    return [[
+                        'event_id' => 'evt-focus-001',
+                        'event_type' => 'call.focus',
+                        'event' => 'call.focus',
+                        'occurred_at' => '2026-04-22T12:00:00Z',
+                        'source' => 'issabel-callcenter',
+                        'company_key' => $companyKey,
+                        'agent_id' => 'Agent/99',
+                        'extension' => '1001',
+                        'call_id' => 'call-focus-001',
+                        'queue' => 'sales',
+                        'status' => 'answered',
+                        'state' => 'answered',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'remote_number' => '71999998888',
+                        'mode' => 'agent-fallback',
+                        'payload' => [],
+                    ]];
+                }}
+            }}
+
+            $service = new CallCenterService(
+                new FakeRuntimeForRelayCampaignTest(),
+                new FakeStoreForRelayCampaignTest(),
+                new FakeDifferForRelayCampaignTest()
+            );
+
+            $response = $service->handle('events.relay', [], [
+                'company_key' => 'demo',
+                'identifier_type' => 'cpf',
+                'attribute_column' => 2,
+            ]);
+
+            echo json_encode($response, JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        event = payload["events"][0]
+        self.assertEqual(event["event_type"], "call.focus")
+        self.assertEqual(event["campaign_context"]["identifier_type"], "cpf")
+        self.assertEqual(event["payload"]["campaign_context"]["identifier_value"], "12345678909")
 
 if __name__ == "__main__":
     unittest.main()

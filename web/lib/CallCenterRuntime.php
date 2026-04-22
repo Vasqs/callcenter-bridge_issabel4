@@ -100,6 +100,41 @@ class CallCenterRuntime
         );
     }
 
+    public function getAgentCampaignContext($agentId, array $options = array())
+    {
+        $agent = $this->resolveAgentReference($agentId);
+        $identifierType = isset($options['identifier_type']) ? trim((string) $options['identifier_type']) : 'cpf';
+        if ($identifierType === '') {
+            $identifierType = 'cpf';
+        }
+
+        $attributeColumn = isset($options['attribute_column']) ? (int) $options['attribute_column'] : 2;
+        if ($attributeColumn <= 0) {
+            $attributeColumn = 2;
+        }
+
+        $activeCall = $this->findActiveCampaignCallForAgent($agent);
+        if (!is_array($activeCall)) {
+            return null;
+        }
+
+        $identifierValue = $this->loadCampaignIdentifierValue($activeCall, $attributeColumn);
+        $resolvedFrom = $identifierValue !== null ? 'call_attribute' : null;
+
+        return array(
+            'agent_id' => isset($agent['agent_id']) ? (string) $agent['agent_id'] : (string) $agentId,
+            'extension' => isset($activeCall['extension']) ? (string) $activeCall['extension'] : '',
+            'call_id' => isset($activeCall['call_id']) ? (string) $activeCall['call_id'] : '',
+            'campaign_id' => isset($activeCall['campaign_id']) ? (string) $activeCall['campaign_id'] : '',
+            'direction' => isset($activeCall['direction']) ? (string) $activeCall['direction'] : 'outbound',
+            'phone' => isset($activeCall['phone']) ? (string) $activeCall['phone'] : '',
+            'identifier_type' => $identifierType,
+            'identifier_value' => $identifierValue,
+            'source' => 'issabel-callcenter-bridge',
+            'resolved_from' => $resolvedFrom,
+        );
+    }
+
     public function resolveAgentReference($reference)
     {
         $reference = trim((string) $reference);
@@ -307,6 +342,18 @@ class CallCenterRuntime
         }
     }
 
+    private function queryPrepared($sql, array $params)
+    {
+        try {
+            $stmt = $this->pdo()->prepare($sql);
+            $stmt->execute($params);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            return is_array($rows) ? $rows : array();
+        } catch (Exception $e) {
+            return array();
+        }
+    }
+
     private function pdo()
     {
         if ($this->pdo instanceof PDO) {
@@ -458,6 +505,116 @@ class CallCenterRuntime
         if (preg_match('#^(?:SIP|PJSIP|Local)/([^@;-]+)#i', $value, $matches) === 1) {
             $candidate = preg_replace('/\D+/', '', (string) $matches[1]);
             return is_string($candidate) ? $candidate : '';
+        }
+
+        return '';
+    }
+
+    private function findActiveCampaignCallForAgent(array $agent)
+    {
+        $agentId = isset($agent['agent_id']) ? (string) $agent['agent_id'] : '';
+        $agentNumber = isset($agent['number']) ? (string) $agent['number'] : '';
+        $routeKey = isset($agent['route_key']) ? (string) $agent['route_key'] : '';
+
+        $calls = $this->queryPrepared(
+            'SELECT uniqueid, queue, agentnum, event, Channel, ChannelClient FROM current_calls WHERE agentnum IN (:agent_id, :agent_number, :route_key) ORDER BY id DESC',
+            array(
+                ':agent_id' => $agentId,
+                ':agent_number' => $agentNumber,
+                ':route_key' => $routeKey,
+            )
+        );
+
+        if (!is_array($calls) || count($calls) === 0) {
+            return null;
+        }
+
+        foreach ($calls as $row) {
+            $callId = isset($row['uniqueid']) ? trim((string) $row['uniqueid']) : '';
+            if ($callId === '') {
+                continue;
+            }
+
+            $call = $this->loadCampaignCallRecord($callId);
+            if (!is_array($call)) {
+                continue;
+            }
+
+            return array(
+                'call_id' => $callId,
+                'campaign_id' => isset($call['campaign_id']) ? (string) $call['campaign_id'] : '',
+                'phone' => $this->normalizeDigits(
+                    isset($call['phone']) && $call['phone'] !== ''
+                        ? $call['phone']
+                        : (isset($row['ChannelClient']) ? $row['ChannelClient'] : '')
+                ),
+                'direction' => 'outbound',
+                'extension' => $this->extractExtensionFromChannel(isset($row['Channel']) ? $row['Channel'] : ''),
+            );
+        }
+
+        return null;
+    }
+
+    private function loadCampaignCallRecord($callId)
+    {
+        $rows = $this->queryPrepared(
+            'SELECT id, id_campaign AS campaign_id, phone, status FROM calls WHERE uniqueid = :uniqueid ORDER BY id DESC LIMIT 1',
+            array(':uniqueid' => $callId)
+        );
+
+        if (is_array($rows) && isset($rows[0]) && is_array($rows[0])) {
+            return $rows[0];
+        }
+
+        return null;
+    }
+
+    private function loadCampaignIdentifierValue(array $activeCall, $attributeColumn)
+    {
+        $callId = isset($activeCall['call_id']) ? trim((string) $activeCall['call_id']) : '';
+        if ($callId === '') {
+            return null;
+        }
+
+        $call = $this->loadCampaignCallRecord($callId);
+        if (!is_array($call) || !isset($call['id'])) {
+            return null;
+        }
+
+        $rows = $this->queryPrepared(
+            'SELECT value FROM call_attribute WHERE id_call = :id_call AND column_number = :column_number ORDER BY id DESC LIMIT 1',
+            array(
+                ':id_call' => (int) $call['id'],
+                ':column_number' => (int) $attributeColumn,
+            )
+        );
+
+        if (!is_array($rows) || !isset($rows[0]['value'])) {
+            return null;
+        }
+
+        $digits = $this->normalizeDigits($rows[0]['value']);
+
+        return $digits !== '' ? $digits : null;
+    }
+
+    private function normalizeDigits($value)
+    {
+        $digits = preg_replace('/\D+/', '', trim((string) $value));
+
+        return is_string($digits) ? $digits : '';
+    }
+
+    private function extractExtensionFromChannel($value)
+    {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return '';
+        }
+
+        if (preg_match('#^(?:SIP|PJSIP|Local)/([^@;-]+)#i', $value, $matches) === 1) {
+            return trim((string) $matches[1]);
         }
 
         return '';
