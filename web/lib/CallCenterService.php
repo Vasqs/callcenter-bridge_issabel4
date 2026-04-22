@@ -309,7 +309,14 @@ class CallCenterService
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($events));
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, (int) (getenv('CALLCENTER_BRIDGE_HTTP_TIMEOUT') ? getenv('CALLCENTER_BRIDGE_HTTP_TIMEOUT') : 10));
+
+        $verifyTls = getenv('CALLCENTER_BRIDGE_VERIFY_TLS');
+        if ($verifyTls !== false && $verifyTls !== '' && in_array(strtolower((string) $verifyTls), array('0', 'false', 'no', 'off'), true)) {
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        }
 
         $body = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
