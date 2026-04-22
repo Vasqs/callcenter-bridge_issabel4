@@ -112,11 +112,19 @@ class CallCenterRuntime
                 'SELECT id, type, number, name, estatus, eccp_password, password FROM agent WHERE id = :id LIMIT 1',
                 array(':id' => (int) $reference)
             );
-            if ($agent === null) {
-                throw new RuntimeException('Agent not found in call_center.agent');
+            if ($agent !== null) {
+                return $agent;
             }
 
-            return $agent;
+            $agent = $this->findAgentRecord(
+                'SELECT id, type, number, name, estatus, eccp_password, password FROM agent WHERE number = :number ORDER BY id ASC LIMIT 1',
+                array(':number' => $reference)
+            );
+            if ($agent !== null) {
+                return $agent;
+            }
+
+            throw new RuntimeException('Agent not found in call_center.agent');
         }
 
         if (strpos($reference, '/') !== false) {

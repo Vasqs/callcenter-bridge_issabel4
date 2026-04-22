@@ -120,8 +120,12 @@ if ($match['operation'] !== 'health') {
     if (preg_match('/^Bearer\s+(.+)$/i', $auth, $matches) === 1) {
         $provided = trim((string) $matches[1]);
     }
+    $queryToken = isset($_GET['token']) ? trim((string) $_GET['token']) : '';
 
-    if ($token === '' || $provided === '' || !callcenter_bridge_hash_equals($token, $provided)) {
+    $hasValidBearer = $token !== '' && $provided !== '' && callcenter_bridge_hash_equals($token, $provided);
+    $hasValidQueryToken = $token !== '' && $queryToken !== '' && callcenter_bridge_hash_equals($token, $queryToken);
+
+    if (!$hasValidBearer && !$hasValidQueryToken) {
         http_response_code(401);
         echo json_encode(array(
             'success' => false,
