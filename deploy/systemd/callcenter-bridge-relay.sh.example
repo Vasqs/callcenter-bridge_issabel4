@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+
+MODULE_ENV_PATH="${CALLCENTER_BRIDGE_MODULE_ENV_PATH:-/root/issabel4-docker/modules/callcenter-bridge_issabel4/module.env}"
+RELAY_URL="${CALLCENTER_BRIDGE_LOCAL_RELAY_URL:-https://127.0.0.1/modules/callcenter_bridge/api.php/v1/events/relay}"
+CURL_BIN="${CURL_BIN:-/usr/bin/curl}"
+
+if [ ! -f "${MODULE_ENV_PATH}" ]; then
+  echo "module env not found: ${MODULE_ENV_PATH}" >&2
+  exit 1
+fi
+
+token="$(grep '^CALLCENTER_BRIDGE_API_TOKEN=' "${MODULE_ENV_PATH}" | head -n1 | cut -d= -f2-)"
+token="${token//$'\r'/}"
+token="$(printf '%s' "${token}" | sed 's/^ *//;s/ *$//')"
+
+if [ -z "${token}" ]; then
+  echo "CALLCENTER_BRIDGE_API_TOKEN missing in ${MODULE_ENV_PATH}" >&2
+  exit 1
+fi
+
+exec "${CURL_BIN}" -sk --max-time 8 \
+  -H "Authorization: Bearer ${token}" \
+  -H "Content-Type: application/json" \
+  -X POST "${RELAY_URL}" \
+  -d '{}'

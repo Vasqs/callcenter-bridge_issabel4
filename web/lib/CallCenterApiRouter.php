@@ -13,6 +13,7 @@ class CallCenterApiRouter
             array('GET', '#^/v1/queues$#', 'queues.list'),
             array('GET', '#^/v1/calls/active$#', 'calls.active'),
             array('GET', '#^/v1/agents/(?P<agentId>[^/]+)/status$#', 'agents.status'),
+            array('GET', '#^/v1/agents/(?P<agentId>[^/]+)/campaign-context$#', 'agents.campaign_context'),
             array('POST', '#^/v1/agents/(?P<agentId>[^/]+)/login$#', 'agents.login'),
             array('POST', '#^/v1/agents/(?P<agentId>[^/]+)/logout$#', 'agents.logout'),
             array('POST', '#^/v1/agents/(?P<agentId>[^/]+)/pause$#', 'agents.pause'),

@@ -1,0 +1,9 @@
+[Unit]
+Description=Callcenter bridge relay tick
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/callcenter-bridge-relay.sh

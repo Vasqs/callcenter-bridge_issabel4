@@ -15,12 +15,6 @@ class CallCenterService
 
     public function handle($operation, array $params, array $payload)
     {
-        $differ = $this->differ;
-        if ($differ === null) {
-            $source = getenv('CALLCENTER_BRIDGE_SOURCE');
-            $differ = new CallCenterSnapshotDiffer($source ? $source : 'issabel-callcenter');
-        }
-
         switch ($operation) {
             case 'health':
                 return array('success' => true, 'health' => $this->runtime->health());
@@ -32,6 +26,8 @@ class CallCenterService
                 return array('success' => true, 'calls' => $this->runtime->listActiveCalls());
             case 'agents.status':
                 return $this->agentStatus($params['agentId']);
+            case 'agents.campaign_context':
+                return $this->campaignContext($params['agentId'], $payload);
             case 'agents.login':
                 return $this->login($params['agentId'], $payload);
             case 'agents.logout':
@@ -48,7 +44,7 @@ class CallCenterService
             case 'calls.hangup':
                 return $this->hangup($params['callId'], $payload);
             case 'events.relay':
-                return $this->relay($differ, $payload);
+                return $this->relay($this->snapshotDiffer(), $payload);
         }
 
         return array(
@@ -56,6 +52,17 @@ class CallCenterService
             'success' => false,
             'message' => 'operation not implemented',
         );
+    }
+
+    private function snapshotDiffer()
+    {
+        if ($this->differ instanceof CallCenterSnapshotDiffer) {
+            return $this->differ;
+        }
+
+        $source = getenv('CALLCENTER_BRIDGE_SOURCE');
+
+        return new CallCenterSnapshotDiffer($source ? $source : 'issabel-callcenter');
     }
 
     private function login($agentId, array $payload)
@@ -184,6 +191,7 @@ class CallCenterService
             : array();
         $nextFocusedCalls = array();
         $events = $differ->diff($previous, $current, $companyKey, is_array($previousFocusedCalls) ? $previousFocusedCalls : array(), $nextFocusedCalls);
+        $events = $this->enrichRelayEventsWithCampaignContext($events, $payload);
         $this->store->writeLastSnapshot($current);
         if (method_exists($this->store, 'writeFocusedCallIds')) {
             $this->store->writeFocusedCallIds(is_array($nextFocusedCalls) ? $nextFocusedCalls : array());
@@ -198,6 +206,86 @@ class CallCenterService
             'success' => true,
             'events' => $events,
             'delivered' => $delivered,
+        );
+    }
+
+    private function campaignContext($agentId, array $payload)
+    {
+        $agent = $this->resolveAgent($agentId);
+        if (isset($agent['success']) && $agent['success'] === false) {
+            return $agent;
+        }
+
+        $options = $this->campaignContextOptions($payload);
+        $context = $this->runtime->getAgentCampaignContext($agent['agent_id'], $options);
+
+        return array(
+            'success' => true,
+            'agent_id' => $agent['agent_id'],
+            'route_key' => $agent['route_key'],
+            'context' => is_array($context) ? $context : null,
+        );
+    }
+
+    private function enrichRelayEventsWithCampaignContext(array $events, array $payload)
+    {
+        if (count($events) === 0) {
+            return $events;
+        }
+
+        $options = $this->campaignContextOptions($payload);
+
+        foreach ($events as $index => $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+
+            $eventType = isset($event['event_type']) ? (string) $event['event_type'] : '';
+            if ($eventType !== 'call.focus' && $eventType !== 'call.answered') {
+                continue;
+            }
+
+            $agentId = isset($event['agent_id']) ? trim((string) $event['agent_id']) : '';
+            if ($agentId === '') {
+                continue;
+            }
+
+            try {
+                $context = $this->runtime->getAgentCampaignContext($agentId, $options);
+            } catch (Exception $e) {
+                $context = null;
+            }
+
+            if (!is_array($context)) {
+                continue;
+            }
+
+            $events[$index]['campaign_context'] = $context;
+            $payloadData = isset($events[$index]['payload']) && is_array($events[$index]['payload'])
+                ? $events[$index]['payload']
+                : array();
+            $payloadData['campaign_context'] = $context;
+            $events[$index]['payload'] = $payloadData;
+        }
+
+        return $events;
+    }
+
+    private function campaignContextOptions(array $payload)
+    {
+        $identifierType = isset($payload['identifier_type']) ? trim((string) $payload['identifier_type']) : '';
+        if ($identifierType === '') {
+            $identifierType = 'cpf';
+        }
+
+        $attributeColumn = isset($payload['attribute_column']) ? (int) $payload['attribute_column'] : 2;
+        if ($attributeColumn <= 0) {
+            $attributeColumn = 2;
+        }
+
+        return array(
+            'identifier_type' => $identifierType,
+            'attribute_column' => $attributeColumn,
         );
     }
 

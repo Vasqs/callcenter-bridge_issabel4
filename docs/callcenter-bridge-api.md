@@ -128,6 +128,42 @@ Eventos já normalizados pelo diff:
 - `call.answered`
 - `call.hangup`
 
+### Campaign context por agente
+
+- `GET /v1/agents/{agentId}/campaign-context`
+
+Query params opcionais:
+
+- `identifier_type` default `cpf`
+- `attribute_column` default `2`
+
+Resposta:
+
+```json
+{
+  "success": true,
+  "context": {
+    "agent_id": "Agent/99",
+    "extension": "1001",
+    "call_id": "1692380000.10",
+    "campaign_id": "2",
+    "direction": "outbound",
+    "phone": "5571999999999",
+    "identifier_type": "cpf",
+    "identifier_value": "12345678909",
+    "source": "issabel-callcenter-bridge",
+    "resolved_from": "call_attribute"
+  }
+}
+```
+
+Observações:
+
+- o bridge resolve apenas contexto estruturado de campanha para integrações do painel
+- ele não replica genericamente qualquer `campaign_external_url.urltemplate`
+- quando não houver chamada de campanha ativa para o agente, retorna `context: null`
+- eventos `call.focus` e `call.answered` podem sair enriquecidos com `campaign_context`
+
 ## Estado local
 
 O módulo persiste em `CALLCENTER_BRIDGE_STATE_ROOT`:
@@ -142,3 +178,26 @@ Esses arquivos vivem por padrão em:
 ## Variáveis
 
 Veja `module.env.example`.
+
+## Relay contínuo no host
+
+Para produção, o relay pode rodar continuamente no host via `systemd` sem depender de execução manual:
+
+- `deploy/systemd/callcenter-bridge-relay.service`
+- `deploy/systemd/callcenter-bridge-relay.timer`
+- `deploy/systemd/callcenter-bridge-relay.sh.example`
+- `scripts/install-callcenter-bridge-relay.sh`
+
+Instalação:
+
+```bash
+./scripts/install-callcenter-bridge-relay.sh
+```
+
+Contrato padrão do instalador:
+
+- script em `/usr/local/bin/callcenter-bridge-relay.sh`
+- timer `callcenter-bridge-relay.timer`
+- frequência `OnUnitActiveSec=1s`
+- URL local `https://127.0.0.1/modules/callcenter_bridge/api.php/v1/events/relay`
+- token carregado do `module.env` do módulo

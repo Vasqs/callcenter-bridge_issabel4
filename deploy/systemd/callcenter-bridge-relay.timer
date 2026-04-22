@@ -1,0 +1,11 @@
+[Unit]
+Description=Run callcenter bridge relay periodically
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=1s
+AccuracySec=250ms
+Unit=callcenter-bridge-relay.service
+
+[Install]
+WantedBy=timers.target
