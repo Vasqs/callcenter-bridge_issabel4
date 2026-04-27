@@ -796,6 +796,72 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         )
         self.assertEqual(payload["runtime_calls"][1]["extension"], "1001")
 
+    def test_callcenter_bridge_runtime_prefers_agent_number_for_plain_numeric_refs(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+
+            class FakeRuntimeForNumericPreferenceTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+
+                public function findAgentRecord($sql, array $params = array()) {{
+                    if (strpos($sql, 'WHERE number = :number') !== false && isset($params[':number']) && $params[':number'] === '34') {{
+                        return [
+                            'agent_id' => 'Agent/34',
+                            'route_key' => '17',
+                            'id' => 17,
+                            'type' => 'Agent',
+                            'number' => '34',
+                            'name' => 'Agent 34',
+                            'enabled' => true,
+                            'estatus' => 'A',
+                        ];
+                    }}
+
+                    if (strpos($sql, 'WHERE id = :id') !== false && isset($params[':id']) && (int) $params[':id'] === 34) {{
+                        return [
+                            'agent_id' => 'Agent/19',
+                            'route_key' => '34',
+                            'id' => 34,
+                            'type' => 'Agent',
+                            'number' => '19',
+                            'name' => 'Agent 19',
+                            'enabled' => true,
+                            'estatus' => 'A',
+                        ];
+                    }}
+
+                    return null;
+                }}
+            }}
+
+            class RuntimeProbe extends FakeRuntimeForNumericPreferenceTest {{
+                public function findAgentRecord($sql, array $params = array()) {{
+                    return parent::findAgentRecord($sql, $params);
+                }}
+            }}
+
+            $runtime = new RuntimeProbe();
+            $plain = $runtime->resolveAgentReference('34');
+            $explicit = $runtime->resolveAgentReference('route:34');
+
+            echo json_encode([
+                'plain' => $plain,
+                'explicit' => $explicit,
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["plain"]["number"], "34")
+        self.assertEqual(payload["plain"]["id"], 17)
+        self.assertEqual(payload["explicit"]["number"], "19")
+        self.assertEqual(payload["explicit"]["id"], 34)
+
     def test_callcenter_bridge_service_exposes_pending_login_as_logging(self) -> None:
         script = textwrap.dedent(
             f"""

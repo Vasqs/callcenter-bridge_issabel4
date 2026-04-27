@@ -142,18 +142,30 @@ class CallCenterRuntime
             throw new InvalidArgumentException('Agent reference is required');
         }
 
-        if (preg_match('/^[0-9]+$/', $reference) === 1) {
+        if (preg_match('/^(?:route|id):([0-9]+)$/i', $reference, $matches) === 1) {
             $agent = $this->findAgentRecord(
                 'SELECT id, type, number, name, estatus, eccp_password, password FROM agent WHERE id = :id LIMIT 1',
-                array(':id' => (int) $reference)
+                array(':id' => (int) $matches[1])
+            );
+            if ($agent !== null) {
+                return $agent;
+            }
+
+            throw new RuntimeException('Agent not found in call_center.agent');
+        }
+
+        if (preg_match('/^[0-9]+$/', $reference) === 1) {
+            $agent = $this->findAgentRecord(
+                'SELECT id, type, number, name, estatus, eccp_password, password FROM agent WHERE number = :number ORDER BY id ASC LIMIT 1',
+                array(':number' => $reference)
             );
             if ($agent !== null) {
                 return $agent;
             }
 
             $agent = $this->findAgentRecord(
-                'SELECT id, type, number, name, estatus, eccp_password, password FROM agent WHERE number = :number ORDER BY id ASC LIMIT 1',
-                array(':number' => $reference)
+                'SELECT id, type, number, name, estatus, eccp_password, password FROM agent WHERE id = :id LIMIT 1',
+                array(':id' => (int) $reference)
             );
             if ($agent !== null) {
                 return $agent;
@@ -632,7 +644,7 @@ class CallCenterRuntime
         return '';
     }
 
-    private function findAgentByTypeAndNumber($type, $number)
+    protected function findAgentByTypeAndNumber($type, $number)
     {
         $type = trim((string) $type);
         $number = trim((string) $number);
@@ -652,7 +664,7 @@ class CallCenterRuntime
         return $agent;
     }
 
-    private function findAgentRecord($sql, array $params)
+    protected function findAgentRecord($sql, array $params)
     {
         $stmt = $this->pdo()->prepare($sql);
         $stmt->execute($params);
