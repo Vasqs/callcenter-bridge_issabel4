@@ -27,6 +27,40 @@ class CallCenterStateStore
         $this->writeJsonFile($this->stateRoot . '/agent_extensions.json', $extensions);
     }
 
+    public function getAgentExtension($routeKey, $agentId = null)
+    {
+        $extensions = $this->readAgentExtensions();
+        $routeStorageKey = $this->routeStorageKey($routeKey);
+
+        if ($routeStorageKey !== null && isset($extensions[$routeStorageKey])) {
+            return $extensions[$routeStorageKey];
+        }
+
+        $agentId = trim((string) $agentId);
+        if ($agentId !== '' && isset($extensions[$agentId])) {
+            return $extensions[$agentId];
+        }
+
+        return null;
+    }
+
+    public function persistAgentExtension($routeKey, $agentId, $extension)
+    {
+        $extensions = $this->readAgentExtensions();
+        $routeStorageKey = $this->routeStorageKey($routeKey);
+
+        if ($routeStorageKey !== null) {
+            $extensions[$routeStorageKey] = $extension;
+        }
+
+        $agentId = trim((string) $agentId);
+        if ($agentId !== '') {
+            $extensions[$agentId] = $extension;
+        }
+
+        $this->writeJsonFile($this->stateRoot . '/agent_extensions.json', $extensions);
+    }
+
     public function readLastSnapshot()
     {
         $data = $this->readJsonFile($this->stateRoot . '/last_snapshot.json');
@@ -83,5 +117,16 @@ class CallCenterStateStore
             @unlink($tempPath);
             throw new RuntimeException('Unable to swap bridge state payload.');
         }
+    }
+
+    private function routeStorageKey($routeKey)
+    {
+        $routeKey = trim((string) $routeKey);
+
+        if ($routeKey === '') {
+            return null;
+        }
+
+        return 'route:' . $routeKey;
     }
 }

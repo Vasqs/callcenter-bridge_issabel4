@@ -301,14 +301,14 @@ class CallCenterRuntime
 
     public function buildSnapshot(CallCenterStateStore $store)
     {
-        $extensions = $store->readAgentExtensions();
         $agents = array();
         foreach ($this->listAgents() as $agent) {
             $agentId = isset($agent['agent_id']) ? (string) $agent['agent_id'] : '';
+            $routeKey = isset($agent['route_key']) ? (string) $agent['route_key'] : '';
             $status = $this->getAgentStatus($agentId);
             $agents[$agentId] = array(
                 'status' => isset($status['status']) ? (string) $status['status'] : 'unknown',
-                'extension' => isset($extensions[$agentId]) ? $extensions[$agentId] : null,
+                'extension' => $store->getAgentExtension($routeKey, $agentId),
                 'queue' => is_array($status['queues']) ? json_encode($status['queues']) : null,
             );
         }

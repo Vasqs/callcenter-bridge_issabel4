@@ -73,8 +73,7 @@ class CallCenterService
         }
         $extension = isset($payload['extension']) ? trim((string) $payload['extension']) : '';
         if ($extension === '') {
-            $extensions = $this->store->readAgentExtensions();
-            $extension = isset($extensions[$agent['agent_id']]) ? (string) $extensions[$agent['agent_id']] : '';
+            $extension = (string) $this->storedAgentExtension($agent);
         }
 
         if ($extension === '') {
@@ -84,6 +83,8 @@ class CallCenterService
                 'message' => 'extension is required for agent login',
             );
         }
+
+        $this->store->persistAgentExtension($agent['route_key'], $agent['agent_id'], $extension);
 
         return array(
             'success' => true,
@@ -109,7 +110,7 @@ class CallCenterService
             );
         }
 
-        $this->store->setAgentExtension($agent['agent_id'], $extension);
+        $this->store->persistAgentExtension($agent['route_key'], $agent['agent_id'], $extension);
 
         return array(
             'success' => true,
@@ -145,10 +146,7 @@ class CallCenterService
 
         $extension = isset($payload['extension']) ? trim((string) $payload['extension']) : '';
         if ($extension === '') {
-            $extensions = $this->store->readAgentExtensions();
-            if (isset($extensions[$agent['agent_id']])) {
-                $extension = trim((string) $extensions[$agent['agent_id']]);
-            }
+            $extension = trim((string) $this->storedAgentExtension($agent));
         }
 
         if ($extension === '') {
@@ -311,6 +309,13 @@ class CallCenterService
         $status = $this->runtime->getAgentStatus($agent['agent_id']);
         $status['route_key'] = $agent['route_key'];
         $status['requested_agent_ref'] = (string) $agentId;
+        $storedExtension = $this->storedAgentExtension($agent);
+        if ($storedExtension !== null && trim((string) $storedExtension) !== '') {
+            $status['extension'] = (string) $storedExtension;
+            if (!isset($status['raw_status']['extension']) || trim((string) $status['raw_status']['extension']) === '') {
+                $status['raw_status']['extension'] = (string) $storedExtension;
+            }
+        }
 
         return array('success' => true, 'agent' => $status);
     }
@@ -379,6 +384,14 @@ class CallCenterService
         }
 
         return $agent;
+    }
+
+    private function storedAgentExtension(array $agent)
+    {
+        return $this->store->getAgentExtension(
+            isset($agent['route_key']) ? $agent['route_key'] : null,
+            isset($agent['agent_id']) ? $agent['agent_id'] : null
+        );
     }
 
     private function postJson($url, array $events, $token)

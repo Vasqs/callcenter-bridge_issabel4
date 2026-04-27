@@ -520,6 +520,20 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public $focusedCalls = ['Agent/1' => 'focus-old'];
                 public function readAgentExtensions() {{ return $this->extensions; }}
                 public function setAgentExtension($agentId, $extension) {{ $this->extensions[$agentId] = $extension; }}
+                public function getAgentExtension($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && isset($this->extensions['route:' . $routeKey])) {{
+                        return $this->extensions['route:' . $routeKey];
+                    }}
+                    return $agentId !== null && isset($this->extensions[$agentId]) ? $this->extensions[$agentId] : null;
+                }}
+                public function persistAgentExtension($routeKey, $agentId, $extension) {{
+                    if ($routeKey !== null && $routeKey !== '') {{
+                        $this->extensions['route:' . $routeKey] = $extension;
+                    }}
+                    if ($agentId !== null && $agentId !== '') {{
+                        $this->extensions[$agentId] = $extension;
+                    }}
+                }}
                 public function readLastSnapshot() {{ return $this->lastSnapshot; }}
                 public function writeLastSnapshot($snapshot) {{ $this->lastSnapshot = $snapshot; }}
                 public function readFocusedCallIds() {{ return $this->focusedCalls; }}
@@ -659,6 +673,20 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public $extensions = [];
                 public function readAgentExtensions() {{ return $this->extensions; }}
                 public function setAgentExtension($agentId, $extension) {{ $this->extensions[$agentId] = $extension; }}
+                public function getAgentExtension($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && isset($this->extensions['route:' . $routeKey])) {{
+                        return $this->extensions['route:' . $routeKey];
+                    }}
+                    return $agentId !== null && isset($this->extensions[$agentId]) ? $this->extensions[$agentId] : null;
+                }}
+                public function persistAgentExtension($routeKey, $agentId, $extension) {{
+                    if ($routeKey !== null && $routeKey !== '') {{
+                        $this->extensions['route:' . $routeKey] = $extension;
+                    }}
+                    if ($agentId !== null && $agentId !== '') {{
+                        $this->extensions[$agentId] = $extension;
+                    }}
+                }}
                 public function readLastSnapshot() {{ return ['agents' => [], 'calls' => []]; }}
                 public function writeLastSnapshot($snapshot) {{ return null; }}
             }}
@@ -667,8 +695,8 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
             $store = new FakeStoreForServiceTest();
             $service = new CallCenterService($runtime, $store);
 
-            $status = $service->handle('agents.status', ['agentId' => '1'], []);
             $setExtension = $service->handle('agents.set_extension', ['agentId' => 'Agent-1'], ['extension' => '1001']);
+            $status = $service->handle('agents.status', ['agentId' => '1'], []);
             $login = $service->handle('agents.login', ['agentId' => '1'], []);
             $originate = $service->handle('calls.originate', [], ['agent_id' => '1', 'phone' => '71986322652']);
             $hangup = $service->handle('calls.hangup', ['callId' => 'call-1'], ['agent_id' => '1']);
@@ -693,12 +721,14 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload["status"]["agent"]["route_key"], "1")
         self.assertEqual(payload["setExtension"]["agent_id"], "Agent/1")
         self.assertEqual(payload["setExtension"]["route_key"], "1")
+        self.assertEqual(payload["extensions"]["route:1"], "1001")
         self.assertEqual(payload["extensions"]["Agent/1"], "1001")
         self.assertEqual(payload["login"]["agent_id"], "Agent/1")
         self.assertEqual(payload["login"]["extension"], "1001")
         self.assertEqual(payload["originate"]["agent_id"], "Agent/1")
         self.assertEqual(payload["originate"]["extension"], "1001")
         self.assertEqual(payload["hangup"]["agent_id"], "Agent/1")
+        self.assertEqual(payload["status"]["agent"]["extension"], "1001")
         self.assertEqual(
             [call["method"] for call in payload["runtime_calls"]],
             ["loginAgent", "originateCall", "hangupAgentCall"],
