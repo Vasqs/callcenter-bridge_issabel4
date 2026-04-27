@@ -85,6 +85,7 @@ class CallCenterService
         }
 
         $this->store->persistAgentExtension($agent['route_key'], $agent['agent_id'], $extension);
+        $this->store->persistPendingLogin($agent['route_key'], $agent['agent_id'], $extension);
 
         return array(
             'success' => true,
@@ -306,7 +307,7 @@ class CallCenterService
         if (isset($agent['success']) && $agent['success'] === false) {
             return $agent;
         }
-        $status = $this->runtime->getAgentStatus($agent['agent_id']);
+        $status = $this->applyPendingLoginStatus($agent, $this->runtime->getAgentStatus($agent['agent_id']));
         $status['route_key'] = $agent['route_key'];
         $status['requested_agent_ref'] = (string) $agentId;
         $storedExtension = $this->storedAgentExtension($agent);
@@ -328,6 +329,7 @@ class CallCenterService
         }
 
         if ($action === 'logout') {
+            $this->store->clearPendingLogin($agent['route_key'], $agent['agent_id']);
             $result = $this->runtime->logoutAgent($agent['agent_id']);
         } elseif ($action === 'pause') {
             $result = $this->runtime->pauseAgent($agent['agent_id'], $options['pause_id']);
@@ -365,6 +367,40 @@ class CallCenterService
             'route_key' => $agent['route_key'],
             'result' => $this->runtime->hangupAgentCall($agent['agent_id']),
         );
+    }
+
+    private function applyPendingLoginStatus(array $agent, array $status)
+    {
+        $pending = $this->store->getPendingLogin(
+            isset($agent['route_key']) ? $agent['route_key'] : null,
+            isset($agent['agent_id']) ? $agent['agent_id'] : null
+        );
+
+        if (!is_array($pending)) {
+            return $status;
+        }
+
+        $currentStatus = isset($status['status']) ? trim((string) $status['status']) : '';
+        if ($currentStatus !== '' && $currentStatus !== 'offline' && $currentStatus !== 'unknown') {
+            $this->store->clearPendingLogin($agent['route_key'], $agent['agent_id']);
+            return $status;
+        }
+
+        $startedAt = isset($pending['started_at']) ? strtotime((string) $pending['started_at']) : false;
+        if ($startedAt === false || (time() - $startedAt) > 45) {
+            $this->store->clearPendingLogin($agent['route_key'], $agent['agent_id']);
+            return $status;
+        }
+
+        $status['status'] = 'logging';
+        if (!isset($status['raw_status']) || !is_array($status['raw_status'])) {
+            $status['raw_status'] = array();
+        }
+        $status['raw_status']['status'] = 'logging';
+        $status['raw_status']['bridge_pending_login'] = true;
+        $status['raw_status']['pending_login_started_at'] = $pending['started_at'];
+
+        return $status;
     }
 
     private function resolveAgent($agentId)

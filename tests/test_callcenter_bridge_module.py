@@ -3,6 +3,7 @@ import tempfile
 import subprocess
 import textwrap
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -518,6 +519,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public $extensions = [];
                 public $lastSnapshot = ['agents' => [], 'calls' => []];
                 public $focusedCalls = ['Agent/1' => 'focus-old'];
+                public $pendingLogins = [];
                 public function readAgentExtensions() {{ return $this->extensions; }}
                 public function setAgentExtension($agentId, $extension) {{ $this->extensions[$agentId] = $extension; }}
                 public function getAgentExtension($routeKey, $agentId = null) {{
@@ -538,6 +540,35 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public function writeLastSnapshot($snapshot) {{ $this->lastSnapshot = $snapshot; }}
                 public function readFocusedCallIds() {{ return $this->focusedCalls; }}
                 public function writeFocusedCallIds($focusedCalls) {{ $this->focusedCalls = $focusedCalls; }}
+                public function readPendingLogins() {{ return $this->pendingLogins; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{
+                    $payload = [
+                        'route_key' => $routeKey,
+                        'agent_id' => $agentId,
+                        'extension' => $extension,
+                        'started_at' => gmdate('c'),
+                    ];
+                    if ($routeKey !== null && $routeKey !== '') {{
+                        $this->pendingLogins['route:' . $routeKey] = $payload;
+                    }}
+                    if ($agentId !== null && $agentId !== '') {{
+                        $this->pendingLogins[$agentId] = $payload;
+                    }}
+                }}
+                public function getPendingLogin($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && isset($this->pendingLogins['route:' . $routeKey])) {{
+                        return $this->pendingLogins['route:' . $routeKey];
+                    }}
+                    return $agentId !== null && isset($this->pendingLogins[$agentId]) ? $this->pendingLogins[$agentId] : null;
+                }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && $routeKey !== '') {{
+                        unset($this->pendingLogins['route:' . $routeKey]);
+                    }}
+                    if ($agentId !== null && $agentId !== '') {{
+                        unset($this->pendingLogins[$agentId]);
+                    }}
+                }}
             }}
 
             $runtime = new FakeRuntimeForFocusRelayTest();
@@ -671,6 +702,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
             class FakeStoreForServiceTest extends CallCenterStateStore {{
                 public function __construct() {{}}
                 public $extensions = [];
+                public $pendingLogins = [];
                 public function readAgentExtensions() {{ return $this->extensions; }}
                 public function setAgentExtension($agentId, $extension) {{ $this->extensions[$agentId] = $extension; }}
                 public function getAgentExtension($routeKey, $agentId = null) {{
@@ -689,6 +721,35 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 }}
                 public function readLastSnapshot() {{ return ['agents' => [], 'calls' => []]; }}
                 public function writeLastSnapshot($snapshot) {{ return null; }}
+                public function readPendingLogins() {{ return $this->pendingLogins; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{
+                    $payload = [
+                        'route_key' => $routeKey,
+                        'agent_id' => $agentId,
+                        'extension' => $extension,
+                        'started_at' => gmdate('c'),
+                    ];
+                    if ($routeKey !== null && $routeKey !== '') {{
+                        $this->pendingLogins['route:' . $routeKey] = $payload;
+                    }}
+                    if ($agentId !== null && $agentId !== '') {{
+                        $this->pendingLogins[$agentId] = $payload;
+                    }}
+                }}
+                public function getPendingLogin($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && isset($this->pendingLogins['route:' . $routeKey])) {{
+                        return $this->pendingLogins['route:' . $routeKey];
+                    }}
+                    return $agentId !== null && isset($this->pendingLogins[$agentId]) ? $this->pendingLogins[$agentId] : null;
+                }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && $routeKey !== '') {{
+                        unset($this->pendingLogins['route:' . $routeKey]);
+                    }}
+                    if ($agentId !== null && $agentId !== '') {{
+                        unset($this->pendingLogins[$agentId]);
+                    }}
+                }}
             }}
 
             $runtime = new FakeRuntimeForServiceTest();
@@ -735,6 +796,73 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         )
         self.assertEqual(payload["runtime_calls"][1]["extension"], "1001")
 
+    def test_callcenter_bridge_service_exposes_pending_login_as_logging(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForPendingLoginTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+                public function resolveAgentReference($reference) {{
+                    return ['agent_id' => 'Agent/90', 'route_key' => '90'];
+                }}
+                public function getAgentStatus($agentId) {{
+                    return [
+                        'agent_id' => $agentId,
+                        'status' => 'offline',
+                        'raw_status' => ['status' => 'offline'],
+                        'queues' => [],
+                    ];
+                }}
+            }}
+
+            class FakeStoreForPendingLoginTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public $pendingLogins = [
+                    'route:90' => [
+                        'route_key' => '90',
+                        'agent_id' => 'Agent/90',
+                        'extension' => '1001',
+                        'started_at' => '{datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}',
+                    ],
+                ];
+                public function readPendingLogins() {{ return $this->pendingLogins; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && isset($this->pendingLogins['route:' . $routeKey])) {{
+                        return $this->pendingLogins['route:' . $routeKey];
+                    }}
+                    return $agentId !== null && isset($this->pendingLogins[$agentId]) ? $this->pendingLogins[$agentId] : null;
+                }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{
+                    if ($routeKey !== null && $routeKey !== '') {{
+                        unset($this->pendingLogins['route:' . $routeKey]);
+                    }}
+                    if ($agentId !== null && $agentId !== '') {{
+                        unset($this->pendingLogins[$agentId]);
+                    }}
+                }}
+            }}
+
+            $service = new CallCenterService(new FakeRuntimeForPendingLoginTest(), new FakeStoreForPendingLoginTest());
+            $response = $service->handle('agents.status', ['agentId' => '90'], []);
+
+            echo json_encode($response, JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["agent"]["status"], "logging")
+        self.assertTrue(payload["agent"]["raw_status"]["bridge_pending_login"])
+
     def test_callcenter_bridge_service_returns_structured_campaign_context(self) -> None:
         script = textwrap.dedent(
             f"""
@@ -767,6 +895,10 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
 
             class FakeStoreForCampaignContextTest extends CallCenterStateStore {{
                 public function __construct() {{}}
+                public function readPendingLogins() {{ return []; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{ return null; }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{ return null; }}
             }}
 
             $service = new CallCenterService(new FakeRuntimeForCampaignContextTest(), new FakeStoreForCampaignContextTest());
@@ -823,6 +955,10 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public function writeLastSnapshot($snapshot) {{ return null; }}
                 public function readFocusedCallIds() {{ return []; }}
                 public function writeFocusedCallIds($snapshot) {{ return null; }}
+                public function readPendingLogins() {{ return []; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{ return null; }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{ return null; }}
             }}
 
             class FakeDifferForRelayCampaignTest extends CallCenterSnapshotDiffer {{

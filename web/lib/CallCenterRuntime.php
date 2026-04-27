@@ -306,8 +306,20 @@ class CallCenterRuntime
             $agentId = isset($agent['agent_id']) ? (string) $agent['agent_id'] : '';
             $routeKey = isset($agent['route_key']) ? (string) $agent['route_key'] : '';
             $status = $this->getAgentStatus($agentId);
+            $effectiveStatus = isset($status['status']) ? (string) $status['status'] : 'unknown';
+            $pending = $store->getPendingLogin($routeKey, $agentId);
+            if (is_array($pending)) {
+                $startedAt = isset($pending['started_at']) ? strtotime((string) $pending['started_at']) : false;
+                if ($effectiveStatus !== '' && $effectiveStatus !== 'offline' && $effectiveStatus !== 'unknown') {
+                    $store->clearPendingLogin($routeKey, $agentId);
+                } elseif ($startedAt !== false && (time() - $startedAt) <= 45) {
+                    $effectiveStatus = 'logging';
+                } else {
+                    $store->clearPendingLogin($routeKey, $agentId);
+                }
+            }
             $agents[$agentId] = array(
-                'status' => isset($status['status']) ? (string) $status['status'] : 'unknown',
+                'status' => $effectiveStatus,
                 'extension' => $store->getAgentExtension($routeKey, $agentId),
                 'queue' => is_array($status['queues']) ? json_encode($status['queues']) : null,
             );

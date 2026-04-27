@@ -85,6 +85,70 @@ class CallCenterStateStore
         $this->writeJsonFile($this->stateRoot . '/focused_calls.json', $focusedCalls);
     }
 
+    public function readPendingLogins()
+    {
+        $data = $this->readJsonFile($this->stateRoot . '/pending_logins.json');
+
+        return is_array($data) ? $data : array();
+    }
+
+    public function persistPendingLogin($routeKey, $agentId, $extension)
+    {
+        $pending = $this->readPendingLogins();
+        $payload = array(
+            'route_key' => trim((string) $routeKey),
+            'agent_id' => trim((string) $agentId),
+            'extension' => trim((string) $extension),
+            'started_at' => gmdate('c'),
+        );
+
+        $routeStorageKey = $this->routeStorageKey($routeKey);
+        if ($routeStorageKey !== null) {
+            $pending[$routeStorageKey] = $payload;
+        }
+
+        $agentId = trim((string) $agentId);
+        if ($agentId !== '') {
+            $pending[$agentId] = $payload;
+        }
+
+        $this->writeJsonFile($this->stateRoot . '/pending_logins.json', $pending);
+    }
+
+    public function getPendingLogin($routeKey, $agentId = null)
+    {
+        $pending = $this->readPendingLogins();
+        $routeStorageKey = $this->routeStorageKey($routeKey);
+
+        if ($routeStorageKey !== null && isset($pending[$routeStorageKey]) && is_array($pending[$routeStorageKey])) {
+            return $pending[$routeStorageKey];
+        }
+
+        $agentId = trim((string) $agentId);
+        if ($agentId !== '' && isset($pending[$agentId]) && is_array($pending[$agentId])) {
+            return $pending[$agentId];
+        }
+
+        return null;
+    }
+
+    public function clearPendingLogin($routeKey, $agentId = null)
+    {
+        $pending = $this->readPendingLogins();
+        $routeStorageKey = $this->routeStorageKey($routeKey);
+
+        if ($routeStorageKey !== null) {
+            unset($pending[$routeStorageKey]);
+        }
+
+        $agentId = trim((string) $agentId);
+        if ($agentId !== '') {
+            unset($pending[$agentId]);
+        }
+
+        $this->writeJsonFile($this->stateRoot . '/pending_logins.json', $pending);
+    }
+
     private function readJsonFile($path)
     {
         if (!is_file($path)) {
