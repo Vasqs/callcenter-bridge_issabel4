@@ -190,6 +190,8 @@ class CallCenterService
             : array();
         $nextFocusedCalls = array();
         $events = $differ->diff($previous, $current, $companyKey, is_array($previousFocusedCalls) ? $previousFocusedCalls : array(), $nextFocusedCalls);
+        $events = $this->appendSyntheticFocusEvents($events, $current, $companyKey, $payload, is_array($previousFocusedCalls) ? $previousFocusedCalls : array(), $nextFocusedCalls);
+        $events = $this->suppressStaleHangupEvents($events, $current);
         $events = $this->enrichRelayEventsWithCampaignContext($events, $payload);
         $this->store->writeLastSnapshot($current);
         if (method_exists($this->store, 'writeFocusedCallIds')) {
@@ -285,6 +287,180 @@ class CallCenterService
         return array(
             'identifier_type' => $identifierType,
             'attribute_column' => $attributeColumn,
+        );
+    }
+
+    private function appendSyntheticFocusEvents(array $events, array $current, $companyKey, array $payload, array $previousFocusedCalls, array &$nextFocusedCalls)
+    {
+        $agents = isset($current['agents']) && is_array($current['agents']) ? $current['agents'] : array();
+        if (count($agents) === 0) {
+            return $events;
+        }
+
+        $calls = isset($current['calls']) && is_array($current['calls']) ? $current['calls'] : array();
+        $options = $this->campaignContextOptions($payload);
+        $seenFocusAgents = array();
+
+        foreach ($events as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+
+            if ((string) (isset($event['event_type']) ? $event['event_type'] : '') !== 'call.focus') {
+                continue;
+            }
+
+            $agentId = trim((string) (isset($event['agent_id']) ? $event['agent_id'] : ''));
+            if ($agentId !== '') {
+                $seenFocusAgents[$agentId] = true;
+            }
+        }
+
+        foreach ($agents as $agentId => $agent) {
+            $agentId = trim((string) $agentId);
+            if ($agentId === '' || isset($seenFocusAgents[$agentId])) {
+                continue;
+            }
+
+            $status = strtolower(trim((string) (isset($agent['status']) ? $agent['status'] : '')));
+            if ($status !== 'oncall') {
+                continue;
+            }
+
+            try {
+                $context = $this->runtime->getAgentCampaignContext($agentId, $options);
+            } catch (Exception $e) {
+                $context = null;
+            }
+
+            if (!is_array($context)) {
+                continue;
+            }
+
+            $callId = trim((string) (isset($context['call_id']) ? $context['call_id'] : ''));
+            if ($callId === '') {
+                continue;
+            }
+
+            $previousCallId = isset($previousFocusedCalls[$agentId]) ? trim((string) $previousFocusedCalls[$agentId]) : '';
+            if ($previousCallId !== '' && $previousCallId === $callId) {
+                $nextFocusedCalls[$agentId] = $callId;
+                continue;
+            }
+
+            $call = isset($calls[$callId]) && is_array($calls[$callId]) ? $calls[$callId] : array();
+            $phone = trim((string) (isset($context['phone']) ? $context['phone'] : (isset($call['phone']) ? $call['phone'] : '')));
+            $direction = trim((string) (isset($context['direction']) ? $context['direction'] : (isset($call['direction']) ? $call['direction'] : 'outbound')));
+            $queue = trim((string) (isset($call['queue']) ? $call['queue'] : ''));
+            $extension = trim((string) (isset($context['extension']) ? $context['extension'] : (isset($agent['extension']) ? $agent['extension'] : '')));
+
+            $events[] = $this->buildRelayEvent(
+                'call.focus',
+                $companyKey,
+                array(
+                    'agent_id' => $agentId,
+                    'extension' => $extension,
+                    'call_id' => $callId,
+                    'queue' => $queue,
+                    'status' => 'answered',
+                    'direction' => $direction !== '' ? $direction : 'outbound',
+                    'phone' => $phone,
+                    'remote_number' => $phone,
+                    'mode' => 'agent-fallback',
+                    'campaign_context' => $context,
+                )
+            );
+            $nextFocusedCalls[$agentId] = $callId;
+        }
+
+        return $events;
+    }
+
+    private function suppressStaleHangupEvents(array $events, array $current)
+    {
+        if (count($events) === 0) {
+            return $events;
+        }
+
+        $agents = isset($current['agents']) && is_array($current['agents']) ? $current['agents'] : array();
+        $activeFocusByAgent = array();
+
+        foreach ($events as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+
+            if ((string) (isset($event['event_type']) ? $event['event_type'] : '') !== 'call.focus') {
+                continue;
+            }
+
+            $agentId = trim((string) (isset($event['agent_id']) ? $event['agent_id'] : ''));
+            $callId = trim((string) (isset($event['call_id']) ? $event['call_id'] : ''));
+            if ($agentId === '' || $callId === '') {
+                continue;
+            }
+
+            $status = strtolower(trim((string) (isset($agents[$agentId]['status']) ? $agents[$agentId]['status'] : '')));
+            if ($status === 'oncall') {
+                $activeFocusByAgent[$agentId] = $callId;
+            }
+        }
+
+        if (count($activeFocusByAgent) === 0) {
+            return $events;
+        }
+
+        $filtered = array();
+        foreach ($events as $event) {
+            if (!is_array($event)) {
+                $filtered[] = $event;
+                continue;
+            }
+
+            $eventType = (string) (isset($event['event_type']) ? $event['event_type'] : '');
+            if ($eventType !== 'call.hangup') {
+                $filtered[] = $event;
+                continue;
+            }
+
+            $agentId = trim((string) (isset($event['agent_id']) ? $event['agent_id'] : ''));
+            $callId = trim((string) (isset($event['call_id']) ? $event['call_id'] : ''));
+            if ($agentId !== '' && isset($activeFocusByAgent[$agentId]) && $activeFocusByAgent[$agentId] !== $callId) {
+                continue;
+            }
+
+            $filtered[] = $event;
+        }
+
+        return $filtered;
+    }
+
+    private function buildRelayEvent($eventType, $companyKey, array $payload)
+    {
+        $occurredAt = gmdate('c');
+        $stable = $eventType . '|' . $companyKey . '|' .
+            (isset($payload['agent_id']) ? $payload['agent_id'] : '') . '|' .
+            (isset($payload['call_id']) ? $payload['call_id'] : '');
+
+        return array(
+            'event_id' => sha1($stable . '|' . $occurredAt),
+            'event_type' => $eventType,
+            'event' => $eventType,
+            'occurred_at' => $occurredAt,
+            'source' => getenv('CALLCENTER_BRIDGE_SOURCE') ? getenv('CALLCENTER_BRIDGE_SOURCE') : 'issabel-callcenter',
+            'company_key' => $companyKey,
+            'agent_id' => isset($payload['agent_id']) ? $payload['agent_id'] : null,
+            'extension' => isset($payload['extension']) ? $payload['extension'] : null,
+            'call_id' => isset($payload['call_id']) ? $payload['call_id'] : null,
+            'queue' => isset($payload['queue']) ? $payload['queue'] : null,
+            'status' => isset($payload['status']) ? $payload['status'] : null,
+            'state' => isset($payload['status']) ? $payload['status'] : null,
+            'pause_code' => isset($payload['pause_code']) ? $payload['pause_code'] : null,
+            'direction' => isset($payload['direction']) ? $payload['direction'] : null,
+            'phone' => isset($payload['phone']) ? $payload['phone'] : null,
+            'remote_number' => isset($payload['remote_number']) ? $payload['remote_number'] : (isset($payload['phone']) ? $payload['phone'] : null),
+            'mode' => isset($payload['mode']) ? $payload['mode'] : 'agent-fallback',
+            'payload' => $payload,
         );
     }
 
@@ -405,21 +581,41 @@ class CallCenterService
 
     private function resolveAgent($agentId)
     {
-        try {
-            $agent = $this->runtime->resolveAgentReference($agentId);
-        } catch (Exception $e) {
-            return array(
-                'status' => 404,
-                'success' => false,
-                'message' => $e->getMessage(),
-            );
+        $references = $this->agentResolutionCandidates($agentId);
+        $lastException = null;
+
+        foreach ($references as $reference) {
+            try {
+                $agent = $this->runtime->resolveAgentReference($reference);
+                if (isset($agent['success']) && $agent['success'] === false) {
+                    return $agent;
+                }
+
+                return $agent;
+            } catch (Exception $e) {
+                $lastException = $e;
+            }
         }
 
-        if (isset($agent['success']) && $agent['success'] === false) {
-            return $agent;
+        return array(
+            'status' => 404,
+            'success' => false,
+            'message' => $lastException ? $lastException->getMessage() : 'Agent not found in call_center.agent',
+        );
+    }
+
+    private function agentResolutionCandidates($agentId)
+    {
+        $agentId = trim((string) $agentId);
+        if ($agentId === '') {
+            return array($agentId);
         }
 
-        return $agent;
+        if (preg_match('/^[0-9]+$/', $agentId) === 1) {
+            return array('route:' . $agentId, $agentId);
+        }
+
+        return array($agentId);
     }
 
     private function storedAgentExtension(array $agent)
