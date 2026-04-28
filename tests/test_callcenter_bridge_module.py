@@ -862,6 +862,149 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload["explicit"]["number"], "19")
         self.assertEqual(payload["explicit"]["id"], 34)
 
+    def test_callcenter_bridge_service_prefers_route_lookup_for_plain_numeric_agent_actions(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForNumericServiceResolutionTest extends CallCenterRuntime {{
+                public $resolvedRefs = [];
+                public $loginCalls = [];
+
+                public function __construct() {{}}
+
+                public function resolveAgentReference($reference) {{
+                    $this->resolvedRefs[] = $reference;
+
+                    if ($reference === 'route:34') {{
+                        return [
+                            'agent_id' => 'Agent/19',
+                            'route_key' => '34',
+                            'id' => 34,
+                            'type' => 'Agent',
+                            'number' => '19',
+                        ];
+                    }}
+
+                    if ($reference === '34') {{
+                        return [
+                            'agent_id' => 'Agent/34',
+                            'route_key' => '17',
+                            'id' => 17,
+                            'type' => 'Agent',
+                            'number' => '34',
+                        ];
+                    }}
+
+                    throw new RuntimeException('Agent not found in call_center.agent');
+                }}
+
+                public function loginAgent($agentId, $extension) {{
+                    $this->loginCalls[] = ['agent_id' => $agentId, 'extension' => $extension];
+                    return ['ok' => true];
+                }}
+            }}
+
+            class FakeStoreForNumericServiceResolutionTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public function persistAgentExtension($routeKey, $agentId, $extension) {{ return null; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getAgentExtension($routeKey, $agentId = null) {{ return null; }}
+            }}
+
+            $runtime = new FakeRuntimeForNumericServiceResolutionTest();
+            $service = new CallCenterService($runtime, new FakeStoreForNumericServiceResolutionTest());
+            $response = $service->handle('agents.login', ['agentId' => '34'], ['extension' => '1001']);
+
+            echo json_encode([
+                'response' => $response,
+                'resolved_refs' => $runtime->resolvedRefs,
+                'login_calls' => $runtime->loginCalls,
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["response"]["success"])
+        self.assertEqual(payload["response"]["agent_id"], "Agent/19")
+        self.assertEqual(payload["response"]["route_key"], "34")
+        self.assertEqual(payload["resolved_refs"], ["route:34"])
+        self.assertEqual(payload["login_calls"][0]["agent_id"], "Agent/19")
+
+    def test_callcenter_bridge_service_falls_back_to_plain_numeric_when_route_lookup_is_missing(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForNumericServiceFallbackTest extends CallCenterRuntime {{
+                public $resolvedRefs = [];
+
+                public function __construct() {{}}
+
+                public function resolveAgentReference($reference) {{
+                    $this->resolvedRefs[] = $reference;
+
+                    if ($reference === 'route:2001') {{
+                        throw new RuntimeException('Agent not found in call_center.agent');
+                    }}
+
+                    if ($reference === '2001') {{
+                        return [
+                            'agent_id' => 'Agent/2001',
+                            'route_key' => '88',
+                            'id' => 88,
+                            'type' => 'Agent',
+                            'number' => '2001',
+                        ];
+                    }}
+
+                    throw new RuntimeException('Agent not found in call_center.agent');
+                }}
+
+                public function getAgentStatus($agentId) {{
+                    return [
+                        'agent_id' => $agentId,
+                        'status' => 'offline',
+                        'raw_status' => ['status' => 'offline'],
+                        'queues' => [],
+                    ];
+                }}
+            }}
+
+            class FakeStoreForNumericServiceFallbackTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public function getAgentExtension($routeKey, $agentId = null) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{ return null; }}
+            }}
+
+            $runtime = new FakeRuntimeForNumericServiceFallbackTest();
+            $service = new CallCenterService($runtime, new FakeStoreForNumericServiceFallbackTest());
+            $response = $service->handle('agents.status', ['agentId' => '2001'], []);
+
+            echo json_encode([
+                'response' => $response,
+                'resolved_refs' => $runtime->resolvedRefs,
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["response"]["success"])
+        self.assertEqual(payload["response"]["agent"]["agent_id"], "Agent/2001")
+        self.assertEqual(payload["resolved_refs"], ["route:2001", "2001"])
+
     def test_callcenter_bridge_service_exposes_pending_login_as_logging(self) -> None:
         script = textwrap.dedent(
             f"""
@@ -1076,6 +1219,314 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(event["event_type"], "call.focus")
         self.assertEqual(event["campaign_context"]["identifier_type"], "cpf")
         self.assertEqual(event["payload"]["campaign_context"]["identifier_value"], "12345678909")
+
+    def test_callcenter_bridge_relay_synthesizes_focus_event_from_campaign_context_when_diff_is_empty(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForSyntheticFocusTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+                public function buildSnapshot($store) {{
+                    return [
+                        'agents' => [
+                            'Agent/1' => ['status' => 'oncall', 'extension' => '1001'],
+                        ],
+                        'calls' => [],
+                    ];
+                }}
+                public function getAgentCampaignContext($agentId, array $options = array()) {{
+                    return [
+                        'agent_id' => $agentId,
+                        'extension' => '1001',
+                        'call_id' => 'eccp-focus-001',
+                        'campaign_id' => '2',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'identifier_type' => 'cpf',
+                        'identifier_value' => '12345678909',
+                        'source' => 'issabel-callcenter-bridge',
+                        'resolved_from' => 'call_attribute',
+                    ];
+                }}
+            }}
+
+            class FakeStoreForSyntheticFocusTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public function readLastSnapshot() {{ return ['agents' => [], 'calls' => []]; }}
+                public function writeLastSnapshot($snapshot) {{ return null; }}
+                public function readFocusedCallIds() {{ return []; }}
+                public function writeFocusedCallIds($snapshot) {{ return null; }}
+                public function readPendingLogins() {{ return []; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{ return null; }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{ return null; }}
+            }}
+
+            class FakeDifferForSyntheticFocusTest extends CallCenterSnapshotDiffer {{
+                public function __construct() {{}}
+                public function diff($previous, $current, $companyKey, $previousFocusedCalls = array(), &$nextFocusedCalls = null) {{
+                    return [];
+                }}
+            }}
+
+            $service = new CallCenterService(
+                new FakeRuntimeForSyntheticFocusTest(),
+                new FakeStoreForSyntheticFocusTest(),
+                new FakeDifferForSyntheticFocusTest()
+            );
+
+            $response = $service->handle('events.relay', [], [
+                'company_key' => 'demo',
+                'identifier_type' => 'cpf',
+                'attribute_column' => 2,
+            ]);
+
+            echo json_encode($response, JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(len(payload["events"]), 1)
+        event = payload["events"][0]
+        self.assertEqual(event["event_type"], "call.focus")
+        self.assertEqual(event["agent_id"], "Agent/1")
+        self.assertEqual(event["call_id"], "eccp-focus-001")
+        self.assertEqual(event["phone"], "71999998888")
+        self.assertEqual(event["status"], "answered")
+        self.assertEqual(event["campaign_context"]["identifier_value"], "12345678909")
+        self.assertEqual(event["payload"]["campaign_context"]["call_id"], "eccp-focus-001")
+
+    def test_callcenter_bridge_relay_suppresses_stale_hangup_when_agent_remains_oncall(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForStaleHangupSuppressionTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+                public function buildSnapshot($store) {{
+                    return [
+                        'agents' => [
+                            'Agent/1' => ['status' => 'oncall', 'extension' => '1001'],
+                        ],
+                        'calls' => [],
+                    ];
+                }}
+                public function getAgentCampaignContext($agentId, array $options = array()) {{
+                    return [
+                        'agent_id' => $agentId,
+                        'extension' => '1001',
+                        'call_id' => 'eccp-focus-001',
+                        'campaign_id' => '2',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'identifier_type' => 'cpf',
+                        'identifier_value' => '12345678909',
+                        'source' => 'issabel-callcenter-bridge',
+                        'resolved_from' => 'call_attribute',
+                    ];
+                }}
+            }}
+
+            class FakeStoreForStaleHangupSuppressionTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public function readLastSnapshot() {{
+                    return [
+                        'agents' => [
+                            'Agent/1' => ['status' => 'oncall', 'extension' => '1001'],
+                        ],
+                        'calls' => [
+                            'old-call-id' => [
+                                'status' => 'answered',
+                                'agent_id' => 'Agent/1',
+                                'phone' => '71999998888',
+                                'direction' => 'outbound',
+                            ],
+                        ],
+                    ];
+                }}
+                public function writeLastSnapshot($snapshot) {{ return null; }}
+                public function readFocusedCallIds() {{ return ['Agent/1' => 'old-call-id']; }}
+                public function writeFocusedCallIds($snapshot) {{ return null; }}
+                public function readPendingLogins() {{ return []; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{ return null; }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{ return null; }}
+            }}
+
+            class FakeDifferForStaleHangupSuppressionTest extends CallCenterSnapshotDiffer {{
+                public function __construct() {{}}
+                public function diff($previous, $current, $companyKey, $previousFocusedCalls = array(), &$nextFocusedCalls = null) {{
+                    return [[
+                        'event_id' => 'evt-hangup-001',
+                        'event_type' => 'call.hangup',
+                        'event' => 'call.hangup',
+                        'occurred_at' => '2026-04-28T12:00:00Z',
+                        'source' => 'issabel-callcenter',
+                        'company_key' => $companyKey,
+                        'agent_id' => 'Agent/1',
+                        'extension' => '1001',
+                        'call_id' => 'old-call-id',
+                        'queue' => '500',
+                        'status' => 'hangup',
+                        'state' => 'hangup',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'remote_number' => '71999998888',
+                        'mode' => 'agent-fallback',
+                        'payload' => [],
+                    ]];
+                }}
+            }}
+
+            $service = new CallCenterService(
+                new FakeRuntimeForStaleHangupSuppressionTest(),
+                new FakeStoreForStaleHangupSuppressionTest(),
+                new FakeDifferForStaleHangupSuppressionTest()
+            );
+
+            $response = $service->handle('events.relay', [], [
+                'company_key' => 'demo',
+                'identifier_type' => 'cpf',
+                'attribute_column' => 2,
+            ]);
+
+            echo json_encode($response, JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        event_types = [event["event_type"] for event in payload["events"]]
+        self.assertEqual(event_types, ["call.focus"])
+        self.assertEqual(payload["events"][0]["call_id"], "eccp-focus-001")
+
+    def test_callcenter_bridge_runtime_uses_eccp_callinfo_when_current_calls_is_empty(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+
+            class FakeRuntimeForEccpActiveCallsTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+
+                protected function query($sql) {{
+                    if (strpos($sql, 'FROM agent ORDER BY number ASC') !== false) {{
+                        return [[
+                            'id' => 1,
+                            'type' => 'Agent',
+                            'number' => '1',
+                            'name' => 'Agent 1',
+                            'estatus' => 'A',
+                        ]];
+                    }}
+
+                    if (strpos($sql, 'FROM current_calls') !== false) {{
+                        return [];
+                    }}
+
+                    if (strpos($sql, 'FROM current_call_entry') !== false) {{
+                        return [];
+                    }}
+
+                    return [];
+                }}
+
+                protected function queryPrepared($sql, array $params) {{
+                    if (strpos($sql, 'FROM calls WHERE id = :id LIMIT 1') !== false) {{
+                        return [[
+                            'id' => 22774,
+                            'campaign_id' => '2',
+                            'phone' => '71996028538',
+                            'status' => 'Success',
+                            'uniqueid' => '1777388719.872',
+                        ]];
+                    }}
+
+                    return [];
+                }}
+
+                protected function safeAgentStatus($agentId) {{
+                    return [
+                        'status' => 'oncall',
+                        'extension' => '1001',
+                        'callinfo' => [
+                            'calltype' => 'outgoing',
+                            'callid' => '22774',
+                            'campaign_id' => '2',
+                            'queuenumber' => '500',
+                            'callnumber' => '71996028538',
+                            'callstatus' => 'Success',
+                        ],
+                    ];
+                }}
+            }}
+
+            $runtime = new FakeRuntimeForEccpActiveCallsTest();
+            echo json_encode($runtime->listActiveCalls(), JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["call_id"], "1777388719.872")
+        self.assertEqual(payload[0]["agent_id"], "Agent/1")
+        self.assertEqual(payload[0]["queue"], "500")
+        self.assertEqual(payload[0]["status"], "answered")
+        self.assertEqual(payload[0]["phone"], "71996028538")
+        self.assertEqual(payload[0]["direction"], "outbound")
+        self.assertEqual(payload[0]["extension"], "1001")
+
+    def test_callcenter_bridge_runtime_agent_status_tolerates_missing_eccp_queue_socket(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+
+            class FakeRuntimeForAgentStatusQueueFallbackTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+
+                protected function safeAgentStatus($agentId) {{
+                    return [
+                        'status' => 'oncall',
+                        'extension' => '1001',
+                    ];
+                }}
+
+                protected function safeAgentQueues($agentId) {{
+                    return [];
+                }}
+            }}
+
+            $runtime = new FakeRuntimeForAgentStatusQueueFallbackTest();
+            echo json_encode($runtime->getAgentStatus('Agent/1'), JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["agent_id"], "Agent/1")
+        self.assertEqual(payload["status"], "oncall")
+        self.assertEqual(payload["raw_status"]["extension"], "1001")
+        self.assertEqual(payload["queues"], [])
 
 if __name__ == "__main__":
     unittest.main()

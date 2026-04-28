@@ -61,11 +61,13 @@ class CallCenterRuntime
     public function listActiveCalls()
     {
         $calls = array();
+        $knownCallIds = array();
 
         foreach ($this->query('SELECT uniqueid, queue, agentnum, event, Channel, ChannelClient FROM current_calls ORDER BY id ASC') as $row) {
             $channelClient = isset($row['ChannelClient']) ? (string) $row['ChannelClient'] : '';
+            $callId = $row['uniqueid'] ? (string) $row['uniqueid'] : sha1(json_encode($row));
             $calls[] = array(
-                'call_id' => $row['uniqueid'] ? (string) $row['uniqueid'] : sha1(json_encode($row)),
+                'call_id' => $callId,
                 'queue' => (string) $row['queue'],
                 'agent_id' => (string) $row['agentnum'],
                 'status' => $this->normalizeCallEvent((string) $row['event']),
@@ -74,17 +76,43 @@ class CallCenterRuntime
                 'phone' => $this->extractPhoneFromChannel($channelClient),
                 'direction' => 'outbound',
             );
+            $knownCallIds[$callId] = true;
         }
 
         foreach ($this->query('SELECT uniqueid, callerid, hold FROM current_call_entry ORDER BY id ASC') as $row) {
+            $callId = $row['uniqueid'] ? (string) $row['uniqueid'] : sha1(json_encode($row));
             $calls[] = array(
-                'call_id' => $row['uniqueid'] ? (string) $row['uniqueid'] : sha1(json_encode($row)),
+                'call_id' => $callId,
                 'queue' => 'incoming',
                 'agent_id' => null,
                 'status' => (isset($row['hold']) && $row['hold'] === 'S') ? 'hold' : 'ringing',
                 'phone' => isset($row['callerid']) ? (string) $row['callerid'] : '',
                 'direction' => 'incoming',
             );
+            $knownCallIds[$callId] = true;
+        }
+
+        foreach ($this->listAgents() as $agent) {
+            $fallbackCall = $this->findEccpCampaignCallForAgent($agent);
+            if (!is_array($fallbackCall)) {
+                continue;
+            }
+
+            $callId = isset($fallbackCall['call_id']) ? trim((string) $fallbackCall['call_id']) : '';
+            if ($callId === '' || isset($knownCallIds[$callId])) {
+                continue;
+            }
+
+            $calls[] = array(
+                'call_id' => $callId,
+                'queue' => isset($fallbackCall['queue']) ? (string) $fallbackCall['queue'] : '',
+                'agent_id' => isset($agent['agent_id']) ? (string) $agent['agent_id'] : '',
+                'status' => isset($fallbackCall['status']) ? (string) $fallbackCall['status'] : 'answered',
+                'phone' => isset($fallbackCall['phone']) ? (string) $fallbackCall['phone'] : '',
+                'direction' => isset($fallbackCall['direction']) ? (string) $fallbackCall['direction'] : 'outbound',
+                'extension' => isset($fallbackCall['extension']) ? (string) $fallbackCall['extension'] : '',
+            );
+            $knownCallIds[$callId] = true;
         }
 
         return $calls;
@@ -92,11 +120,13 @@ class CallCenterRuntime
 
     public function getAgentStatus($agentId)
     {
+        $status = $this->safeAgentStatus($agentId);
+
         return array(
             'agent_id' => $agentId,
-            'status' => isset($this->safeAgentStatus($agentId)['status']) ? $this->safeAgentStatus($agentId)['status'] : 'unknown',
-            'raw_status' => $this->safeAgentStatus($agentId),
-            'queues' => $this->eccpCall('getagentqueues', array($agentId)),
+            'status' => isset($status['status']) ? $status['status'] : 'unknown',
+            'raw_status' => $status,
+            'queues' => $this->safeAgentQueues($agentId),
         );
     }
 
@@ -114,6 +144,9 @@ class CallCenterRuntime
         }
 
         $activeCall = $this->findActiveCampaignCallForAgent($agent);
+        if (!is_array($activeCall)) {
+            $activeCall = $this->findEccpCampaignCallForAgent($agent);
+        }
         if (!is_array($activeCall)) {
             return null;
         }
@@ -355,7 +388,7 @@ class CallCenterRuntime
         );
     }
 
-    private function query($sql)
+    protected function query($sql)
     {
         try {
             $stmt = $this->pdo()->query($sql);
@@ -366,7 +399,7 @@ class CallCenterRuntime
         }
     }
 
-    private function queryPrepared($sql, array $params)
+    protected function queryPrepared($sql, array $params)
     {
         try {
             $stmt = $this->pdo()->prepare($sql);
@@ -440,12 +473,21 @@ class CallCenterRuntime
         return $this->xmlToArray($result);
     }
 
-    private function safeAgentStatus($agentId)
+    protected function safeAgentStatus($agentId)
     {
         try {
             return $this->eccpCall('getAgentStatus', array(), $agentId);
         } catch (Exception $e) {
             return array('status' => 'unknown');
+        }
+    }
+
+    protected function safeAgentQueues($agentId)
+    {
+        try {
+            return $this->eccpCall('getagentqueues', array($agentId));
+        } catch (Exception $e) {
+            return array();
         }
     }
 
@@ -580,6 +622,66 @@ class CallCenterRuntime
         return null;
     }
 
+    private function findEccpCampaignCallForAgent(array $agent)
+    {
+        $agentId = isset($agent['agent_id']) ? (string) $agent['agent_id'] : '';
+        if ($agentId === '') {
+            return null;
+        }
+
+        $status = $this->safeAgentStatus($agentId);
+        if (!is_array($status)) {
+            return null;
+        }
+
+        foreach (array('callinfo', 'waitedcallinfo') as $key) {
+            $callInfo = isset($status[$key]) && is_array($status[$key]) ? $status[$key] : null;
+            if (!is_array($callInfo)) {
+                continue;
+            }
+
+            $callDbId = isset($callInfo['callid']) ? (int) $callInfo['callid'] : 0;
+            if ($callDbId <= 0) {
+                continue;
+            }
+
+            $call = $this->loadCampaignCallRecordById($callDbId);
+            $campaignId = '';
+            if (is_array($call) && isset($call['campaign_id'])) {
+                $campaignId = (string) $call['campaign_id'];
+            } elseif (isset($callInfo['campaign_id'])) {
+                $campaignId = (string) $callInfo['campaign_id'];
+            }
+
+            if ($campaignId === '') {
+                continue;
+            }
+
+            $phone = $this->normalizeDigits(
+                isset($callInfo['callnumber']) && $callInfo['callnumber'] !== ''
+                    ? $callInfo['callnumber']
+                    : (is_array($call) && isset($call['phone']) ? $call['phone'] : '')
+            );
+            $uniqueId = is_array($call) && isset($call['uniqueid']) ? trim((string) $call['uniqueid']) : '';
+            $callType = isset($callInfo['calltype']) ? strtolower(trim((string) $callInfo['calltype'])) : 'outgoing';
+            $callStatus = isset($callInfo['callstatus']) ? strtolower(trim((string) $callInfo['callstatus'])) : '';
+            $queue = isset($callInfo['queuenumber']) ? trim((string) $callInfo['queuenumber']) : '';
+
+            return array(
+                'call_id' => $uniqueId !== '' ? $uniqueId : 'callcenter-call:'.$callDbId,
+                'call_db_id' => $callDbId,
+                'campaign_id' => $campaignId,
+                'phone' => $phone,
+                'direction' => $callType === 'incoming' ? 'incoming' : 'outbound',
+                'queue' => $queue,
+                'status' => $this->normalizeEccpCallStatus($callStatus, $key),
+                'extension' => isset($status['extension']) ? trim((string) $status['extension']) : '',
+            );
+        }
+
+        return null;
+    }
+
     private function loadCampaignCallRecord($callId)
     {
         $rows = $this->queryPrepared(
@@ -594,22 +696,41 @@ class CallCenterRuntime
         return null;
     }
 
-    private function loadCampaignIdentifierValue(array $activeCall, $attributeColumn)
+    private function loadCampaignCallRecordById($callDbId)
     {
-        $callId = isset($activeCall['call_id']) ? trim((string) $activeCall['call_id']) : '';
-        if ($callId === '') {
-            return null;
+        $rows = $this->queryPrepared(
+            'SELECT id, id_campaign AS campaign_id, phone, status, uniqueid FROM calls WHERE id = :id LIMIT 1',
+            array(':id' => (int) $callDbId)
+        );
+
+        if (is_array($rows) && isset($rows[0]) && is_array($rows[0])) {
+            return $rows[0];
         }
 
-        $call = $this->loadCampaignCallRecord($callId);
-        if (!is_array($call) || !isset($call['id'])) {
-            return null;
+        return null;
+    }
+
+    private function loadCampaignIdentifierValue(array $activeCall, $attributeColumn)
+    {
+        $callDbId = isset($activeCall['call_db_id']) ? (int) $activeCall['call_db_id'] : 0;
+        if ($callDbId <= 0) {
+            $callId = isset($activeCall['call_id']) ? trim((string) $activeCall['call_id']) : '';
+            if ($callId === '') {
+                return null;
+            }
+
+            $call = $this->loadCampaignCallRecord($callId);
+            if (!is_array($call) || !isset($call['id'])) {
+                return null;
+            }
+
+            $callDbId = (int) $call['id'];
         }
 
         $rows = $this->queryPrepared(
             'SELECT value FROM call_attribute WHERE id_call = :id_call AND column_number = :column_number ORDER BY id DESC LIMIT 1',
             array(
-                ':id_call' => (int) $call['id'],
+                ':id_call' => $callDbId,
                 ':column_number' => (int) $attributeColumn,
             )
         );
@@ -628,6 +749,25 @@ class CallCenterRuntime
         $digits = preg_replace('/\D+/', '', trim((string) $value));
 
         return is_string($digits) ? $digits : '';
+    }
+
+    private function normalizeEccpCallStatus($callStatus, $sourceKey)
+    {
+        $callStatus = strtolower(trim((string) $callStatus));
+        $sourceKey = strtolower(trim((string) $sourceKey));
+
+        if ($sourceKey === 'waitedcallinfo') {
+            return 'ringing';
+        }
+
+        if ($callStatus === 'ringing' || $callStatus === 'dialing' || $callStatus === 'placing') {
+            return 'ringing';
+        }
+        if ($callStatus === 'hold') {
+            return 'hold';
+        }
+
+        return 'answered';
     }
 
     private function extractExtensionFromChannel($value)
