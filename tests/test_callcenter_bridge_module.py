@@ -626,6 +626,65 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload["focus2"]["call_id"], "answered-newer")
         self.assertEqual(payload["focused_calls"]["Agent/1"], "answered-newer")
 
+    def test_callcenter_bridge_service_relay_does_not_advance_snapshot_when_webhook_delivery_fails(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForFailedDeliveryRelayTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+                public function buildSnapshot($store) {{ return ['agents' => [], 'calls' => []]; }}
+            }}
+
+            class FakeStoreForFailedDeliveryRelayTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public $lastSnapshot = ['agents' => [], 'calls' => []];
+                public $focusedCalls = [];
+                public function readLastSnapshot() {{ return $this->lastSnapshot; }}
+                public function writeLastSnapshot($snapshot) {{ $this->lastSnapshot = $snapshot; }}
+                public function readFocusedCallIds() {{ return $this->focusedCalls; }}
+                public function writeFocusedCallIds($focusedCalls) {{ $this->focusedCalls = $focusedCalls; }}
+                public function readPendingLogins() {{ return []; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{ return null; }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{ return null; }}
+            }}
+
+            $store = new FakeStoreForFailedDeliveryRelayTest();
+            $service = new CallCenterService(new FakeRuntimeForFailedDeliveryRelayTest(), $store);
+            $current = [
+                'agents' => [
+                    'Agent/1' => ['status' => 'online', 'extension' => '1001'],
+                ],
+                'calls' => [],
+            ];
+
+            $response = $service->handle('events.relay', [], [
+                'company_key' => 'company-demo',
+                'snapshot' => $current,
+                'webhook_url' => 'http://127.0.0.1:9/unreachable',
+            ]);
+
+            echo json_encode([
+                'events' => $response['events'],
+                'delivered' => $response['delivered'],
+                'lastSnapshot' => $store->lastSnapshot,
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertGreater(len(payload["events"]), 0)
+        self.assertEqual(payload["delivered"]["status"], 0)
+        self.assertEqual(payload["lastSnapshot"], {"agents": [], "calls": []})
+
     def test_callcenter_bridge_state_store_writes_json_atomically(self) -> None:
         store_code = (MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php").read_text()
 
@@ -912,6 +971,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public function __construct() {{}}
                 public function persistAgentExtension($routeKey, $agentId, $extension) {{ return null; }}
                 public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{ return null; }}
                 public function getAgentExtension($routeKey, $agentId = null) {{ return null; }}
             }}
 
@@ -936,6 +996,93 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload["response"]["route_key"], "34")
         self.assertEqual(payload["resolved_refs"], ["route:34"])
         self.assertEqual(payload["login_calls"][0]["agent_id"], "Agent/19")
+
+    def test_callcenter_bridge_service_retries_logging_login_until_channel_exists(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForLoginRetryTest extends CallCenterRuntime {{
+                public $loginCalls = [];
+                public $channelChecks = 0;
+
+                public function __construct() {{}}
+
+                public function resolveAgentReference($reference) {{
+                    return [
+                        'agent_id' => 'Agent/19',
+                        'route_key' => '34',
+                        'id' => 34,
+                        'type' => 'Agent',
+                        'number' => '19',
+                    ];
+                }}
+
+                public function loginAgent($agentId, $extension) {{
+                    $this->loginCalls[] = ['agent_id' => $agentId, 'extension' => $extension];
+                    return ['status' => 'logging'];
+                }}
+
+                public function waitForAgentLoginChannel($extension, $timeoutMs = null) {{
+                    $this->channelChecks++;
+                    return $this->channelChecks >= 2;
+                }}
+            }}
+
+            class FakeStoreForLoginRetryTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public $extensions = [];
+                public $pendingLogins = [];
+                public $cleared = 0;
+
+                public function persistAgentExtension($routeKey, $agentId, $extension) {{
+                    $this->extensions[$agentId] = $extension;
+                }}
+
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{
+                    $this->pendingLogins[] = [
+                        'route_key' => $routeKey,
+                        'agent_id' => $agentId,
+                        'extension' => $extension,
+                    ];
+                }}
+
+                public function clearPendingLogin($routeKey, $agentId = null) {{
+                    $this->cleared++;
+                }}
+
+                public function getAgentExtension($routeKey, $agentId = null) {{ return null; }}
+            }}
+
+            $runtime = new FakeRuntimeForLoginRetryTest();
+            $store = new FakeStoreForLoginRetryTest();
+            $service = new CallCenterService($runtime, $store);
+            $response = $service->handle('agents.login', ['agentId' => '34'], ['extension' => '1001']);
+
+            echo json_encode([
+                'response' => $response,
+                'login_calls' => $runtime->loginCalls,
+                'channel_checks' => $runtime->channelChecks,
+                'pending_logins' => $store->pendingLogins,
+                'cleared' => $store->cleared,
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["response"]["success"])
+        self.assertEqual(len(payload["login_calls"]), 2)
+        self.assertEqual(payload["channel_checks"], 2)
+        self.assertEqual(len(payload["pending_logins"]), 1)
+        self.assertEqual(payload["response"]["result"]["bridge_login_channel_ready"], True)
+        self.assertEqual(payload["response"]["result"]["bridge_login_attempts"], 2)
+        self.assertEqual(payload["cleared"], 0)
 
     def test_callcenter_bridge_service_falls_back_to_plain_numeric_when_route_lookup_is_missing(self) -> None:
         script = textwrap.dedent(
@@ -1491,6 +1638,54 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload[0]["status"], "answered")
         self.assertEqual(payload[0]["phone"], "71996028538")
         self.assertEqual(payload[0]["direction"], "outbound")
+        self.assertEqual(payload[0]["extension"], "1001")
+
+    def test_callcenter_bridge_runtime_normalizes_numeric_current_call_agent_and_channel_phone(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+
+            class FakeRuntimeForCurrentCallNormalizationTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+
+                public function listAgents() {{
+                    return [
+                        ['agent_id' => 'Agent/1', 'route_key' => '1', 'number' => '1', 'type' => 'Agent'],
+                    ];
+                }}
+
+                protected function query($sql) {{
+                    if (strpos($sql, 'FROM current_calls') !== false) {{
+                        return [[
+                            'uniqueid' => 'call-normalized-001',
+                            'queue' => '500',
+                            'agentnum' => '1',
+                            'event' => 'Link',
+                            'Channel' => 'SIP/1001-0000002b',
+                            'ChannelClient' => 'SIP/5571999999999-0000002a',
+                        ]];
+                    }}
+
+                    if (strpos($sql, 'FROM current_call_entry') !== false) {{
+                        return [];
+                    }}
+
+                    return [];
+                }}
+            }}
+
+            $runtime = new FakeRuntimeForCurrentCallNormalizationTest();
+            echo json_encode($runtime->listActiveCalls(), JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload[0]["agent_id"], "Agent/1")
+        self.assertEqual(payload[0]["phone"], "5571999999999")
         self.assertEqual(payload[0]["extension"], "1001")
 
     def test_callcenter_bridge_runtime_agent_status_tolerates_missing_eccp_queue_socket(self) -> None:
