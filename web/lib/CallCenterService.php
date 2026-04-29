@@ -85,15 +85,86 @@ class CallCenterService
         }
 
         $this->store->persistAgentExtension($agent['route_key'], $agent['agent_id'], $extension);
-        $this->store->persistPendingLogin($agent['route_key'], $agent['agent_id'], $extension);
+        $result = $this->loginAgentWithConfirmationRetry($agent['agent_id'], $extension);
+
+        if ($this->isPendingLoginResult($result)) {
+            if (isset($result['bridge_login_channel_ready']) && $result['bridge_login_channel_ready']) {
+                $this->store->persistPendingLogin($agent['route_key'], $agent['agent_id'], $extension);
+            } else {
+                $this->store->clearPendingLogin($agent['route_key'], $agent['agent_id']);
+
+                return array(
+                    'status' => 503,
+                    'success' => false,
+                    'agent_id' => $agent['agent_id'],
+                    'route_key' => $agent['route_key'],
+                    'result' => $result,
+                    'extension' => $extension,
+                    'message' => 'agent login confirmation call was not originated',
+                );
+            }
+        } else {
+            $this->store->clearPendingLogin($agent['route_key'], $agent['agent_id']);
+        }
 
         return array(
             'success' => true,
             'agent_id' => $agent['agent_id'],
             'route_key' => $agent['route_key'],
-            'result' => $this->runtime->loginAgent($agent['agent_id'], $extension),
+            'result' => $result,
             'extension' => $extension,
         );
+    }
+
+    private function loginAgentWithConfirmationRetry($agentId, $extension)
+    {
+        $attempts = $this->loginConfirmationAttempts();
+        $lastResult = null;
+
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            $lastResult = $this->runtime->loginAgent($agentId, $extension);
+            if (!$this->isPendingLoginResult($lastResult)) {
+                return $lastResult;
+            }
+
+            if ($this->runtime->waitForAgentLoginChannel($extension)) {
+                $lastResult['bridge_login_channel_ready'] = true;
+                $lastResult['bridge_login_attempts'] = $attempt;
+
+                return $lastResult;
+            }
+        }
+
+        if (is_array($lastResult)) {
+            $lastResult['bridge_login_channel_ready'] = false;
+            $lastResult['bridge_login_attempts'] = $attempts;
+        }
+
+        return $lastResult;
+    }
+
+    private function loginConfirmationAttempts()
+    {
+        $value = getenv('CALLCENTER_BRIDGE_LOGIN_CONFIRMATION_ATTEMPTS');
+        $attempts = ($value !== false && $value !== '') ? (int) $value : 3;
+
+        return max(1, min(5, $attempts));
+    }
+
+    private function isPendingLoginResult($result)
+    {
+        if (!is_array($result)) {
+            return false;
+        }
+
+        $status = isset($result['status']) ? strtolower(trim((string) $result['status'])) : '';
+        if ($status === 'logging' || $status === 'login' || $status === 'pending') {
+            return true;
+        }
+
+        $message = isset($result['message']) ? strtolower(trim((string) $result['message'])) : '';
+
+        return strpos($message, 'logging') !== false;
     }
 
     private function setExtension($agentId, array $payload)
@@ -193,20 +264,33 @@ class CallCenterService
         $events = $this->appendSyntheticFocusEvents($events, $current, $companyKey, $payload, is_array($previousFocusedCalls) ? $previousFocusedCalls : array(), $nextFocusedCalls);
         $events = $this->suppressStaleHangupEvents($events, $current);
         $events = $this->enrichRelayEventsWithCampaignContext($events, $payload);
-        $this->store->writeLastSnapshot($current);
-        if (method_exists($this->store, 'writeFocusedCallIds')) {
-            $this->store->writeFocusedCallIds(is_array($nextFocusedCalls) ? $nextFocusedCalls : array());
-        }
 
         $delivered = null;
         if ($webhookUrl !== '' && count($events) > 0) {
             $delivered = $this->postJson($webhookUrl, $events, $webhookToken);
         }
 
+        $shouldPersist = $webhookUrl === ''
+            || count($events) === 0
+            || (
+                is_array($delivered)
+                && isset($delivered['status'])
+                && (int) $delivered['status'] >= 200
+                && (int) $delivered['status'] < 300
+            );
+
+        if ($shouldPersist) {
+            $this->store->writeLastSnapshot($current);
+            if (method_exists($this->store, 'writeFocusedCallIds')) {
+                $this->store->writeFocusedCallIds(is_array($nextFocusedCalls) ? $nextFocusedCalls : array());
+            }
+        }
+
         return array(
             'success' => true,
             'events' => $events,
             'delivered' => $delivered,
+            'persisted' => $shouldPersist,
         );
     }
 

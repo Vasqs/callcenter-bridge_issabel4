@@ -62,18 +62,21 @@ class CallCenterRuntime
     {
         $calls = array();
         $knownCallIds = array();
+        $agentsByNumber = $this->agentsByNumber();
 
         foreach ($this->query('SELECT uniqueid, queue, agentnum, event, Channel, ChannelClient FROM current_calls ORDER BY id ASC') as $row) {
             $channelClient = isset($row['ChannelClient']) ? (string) $row['ChannelClient'] : '';
+            $channel = isset($row['Channel']) ? (string) $row['Channel'] : '';
             $callId = $row['uniqueid'] ? (string) $row['uniqueid'] : sha1(json_encode($row));
             $calls[] = array(
                 'call_id' => $callId,
                 'queue' => (string) $row['queue'],
-                'agent_id' => (string) $row['agentnum'],
+                'agent_id' => $this->normalizeCurrentCallAgentId((string) $row['agentnum'], $agentsByNumber),
                 'status' => $this->normalizeCallEvent((string) $row['event']),
-                'channel' => (string) $row['Channel'],
+                'channel' => $channel,
                 'channel_client' => $channelClient,
                 'phone' => $this->extractPhoneFromChannel($channelClient),
+                'extension' => $this->extractPhoneFromChannel($channel),
                 'direction' => 'outbound',
             );
             $knownCallIds[$callId] = true;
@@ -250,6 +253,47 @@ class CallCenterRuntime
         return $this->eccpCall('loginagent', array($extension), $agentId, $this->resolveAgentPassword($agentId));
     }
 
+    public function waitForAgentLoginChannel($extension, $timeoutMs = null)
+    {
+        $timeoutMs = $timeoutMs === null ? $this->agentLoginChannelTimeoutMs() : (int) $timeoutMs;
+        $deadline = microtime(true) + (max(100, $timeoutMs) / 1000);
+
+        do {
+            if ($this->hasAgentLoginChannel($extension)) {
+                return true;
+            }
+
+            usleep(250000);
+        } while (microtime(true) < $deadline);
+
+        return $this->hasAgentLoginChannel($extension);
+    }
+
+    public function hasAgentLoginChannel($extension)
+    {
+        $extension = trim((string) $extension);
+        if ($extension === '' || preg_match('/^[A-Za-z0-9_.-]+$/', $extension) !== 1) {
+            return false;
+        }
+
+        $output = array();
+        $exitCode = 0;
+        exec('asterisk -rx ' . escapeshellarg('core show channels concise') . ' 2>&1', $output, $exitCode);
+        if ($exitCode !== 0) {
+            return false;
+        }
+
+        $prefixPattern = '#^(?:SIP|PJSIP|Local)/' . preg_quote($extension, '#') . '(?:[-@;!]|$)#i';
+        foreach ($output as $line) {
+            $line = (string) $line;
+            if (preg_match($prefixPattern, $line) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function logoutAgent($agentId)
     {
         return $this->eccpCall('logoutagent', array(), $agentId, $this->resolveAgentPassword($agentId));
@@ -376,6 +420,7 @@ class CallCenterRuntime
             $calls[$callId] = array(
                 'status' => isset($call['status']) ? (string) $call['status'] : 'unknown',
                 'agent_id' => isset($call['agent_id']) ? (string) $call['agent_id'] : '',
+                'extension' => isset($call['extension']) ? (string) $call['extension'] : '',
                 'phone' => isset($call['phone']) ? (string) $call['phone'] : '',
                 'queue' => isset($call['queue']) ? (string) $call['queue'] : '',
                 'direction' => isset($call['direction']) ? (string) $call['direction'] : '',
@@ -514,6 +559,14 @@ class CallCenterRuntime
         return $exitCode === 0;
     }
 
+    private function agentLoginChannelTimeoutMs()
+    {
+        $value = getenv('CALLCENTER_BRIDGE_LOGIN_CONFIRMATION_CHANNEL_TIMEOUT_MS');
+        $timeoutMs = ($value !== false && $value !== '') ? (int) $value : 2500;
+
+        return max(100, min(10000, $timeoutMs));
+    }
+
     private function xmlToArray($value)
     {
         if ($value instanceof SimpleXMLElement) {
@@ -563,17 +616,46 @@ class CallCenterRuntime
             return '';
         }
 
-        $digits = preg_replace('/\D+/', '', $value);
-        if (is_string($digits) && $digits !== '') {
-            return $digits;
-        }
-
         if (preg_match('#^(?:SIP|PJSIP|Local)/([^@;-]+)#i', $value, $matches) === 1) {
             $candidate = preg_replace('/\D+/', '', (string) $matches[1]);
             return is_string($candidate) ? $candidate : '';
         }
 
+        $digits = preg_replace('/\D+/', '', $value);
+        if (is_string($digits) && $digits !== '') {
+            return $digits;
+        }
+
         return '';
+    }
+
+    private function agentsByNumber()
+    {
+        $agents = array();
+
+        foreach ($this->listAgents() as $agent) {
+            $number = isset($agent['number']) ? trim((string) $agent['number']) : '';
+            $agentId = isset($agent['agent_id']) ? trim((string) $agent['agent_id']) : '';
+            if ($number !== '' && $agentId !== '') {
+                $agents[$number] = $agentId;
+            }
+        }
+
+        return $agents;
+    }
+
+    private function normalizeCurrentCallAgentId($agentId, array $agentsByNumber)
+    {
+        $agentId = trim((string) $agentId);
+        if ($agentId === '') {
+            return '';
+        }
+
+        if (strpos($agentId, '/') !== false) {
+            return $agentId;
+        }
+
+        return isset($agentsByNumber[$agentId]) ? $agentsByNumber[$agentId] : $agentId;
     }
 
     private function findActiveCampaignCallForAgent(array $agent)
