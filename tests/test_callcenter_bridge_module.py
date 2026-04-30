@@ -511,6 +511,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public function pauseAgent($agentId, $pauseId) {{ return ['ok' => true]; }}
                 public function unpauseAgent($agentId) {{ return ['ok' => true]; }}
                 public function hangupAgentCall($agentId) {{ return ['ok' => true]; }}
+                public function hangupCall($callId, $agentId) {{ return ['ok' => true]; }}
                 public function originateCall($agentId, $extension, $phone, $callId) {{ return ['ok' => true]; }}
             }}
 
@@ -752,6 +753,10 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                     $this->calls[] = ['method' => 'hangupAgentCall', 'agent_id' => $agentId];
                     return ['ok' => true];
                 }}
+                public function hangupCall($callId, $agentId) {{
+                    $this->calls[] = ['method' => 'hangupCall', 'call_id' => $callId, 'agent_id' => $agentId];
+                    return ['ok' => true, 'call_id' => $callId];
+                }}
                 public function originateCall($agentId, $extension, $phone, $callId) {{
                     $this->calls[] = ['method' => 'originateCall', 'agent_id' => $agentId, 'extension' => $extension, 'phone' => $phone, 'call_id' => $callId];
                     return ['ok' => true];
@@ -851,9 +856,10 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload["status"]["agent"]["extension"], "1001")
         self.assertEqual(
             [call["method"] for call in payload["runtime_calls"]],
-            ["loginAgent", "originateCall", "hangupAgentCall"],
+            ["loginAgent", "originateCall", "hangupCall"],
         )
         self.assertEqual(payload["runtime_calls"][1]["extension"], "1001")
+        self.assertEqual(payload["runtime_calls"][2]["call_id"], "call-1")
 
     def test_callcenter_bridge_runtime_prefers_agent_number_for_plain_numeric_refs(self) -> None:
         script = textwrap.dedent(
@@ -1687,6 +1693,71 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload[0]["agent_id"], "Agent/1")
         self.assertEqual(payload[0]["phone"], "5571999999999")
         self.assertEqual(payload[0]["extension"], "1001")
+
+    def test_callcenter_bridge_runtime_hangup_call_targets_customer_channel(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+
+            class FakeRuntimeForCustomerChannelHangupTest extends CallCenterRuntime {{
+                public function __construct() {{}}
+                public $commands = [];
+
+                public function resolveAgentReference($reference) {{
+                    return [
+                        'id' => 1,
+                        'agent_id' => 'Agent/1',
+                        'type' => 'Agent',
+                        'number' => '1',
+                        'name' => 'Agent 1',
+                        'estatus' => 'A',
+                    ];
+                }}
+
+                protected function queryPrepared($sql, array $params) {{
+                    if (strpos($sql, 'FROM current_calls WHERE uniqueid = :call_id') !== false) {{
+                        return [[
+                            'uniqueid' => 'call-bridge-001',
+                            'queue' => '500',
+                            'agentnum' => '1',
+                            'event' => 'Link',
+                            'Channel' => 'SIP/1001-0000002b',
+                            'ChannelClient' => 'SIP/5571999999999-0000002a',
+                        ]];
+                    }}
+
+                    return [];
+                }}
+
+                protected function execAsteriskRx($command, array &$output = null, &$exitCode = null) {{
+                    $this->commands[] = $command;
+                    $output = ['requested'];
+                    $exitCode = 0;
+                    return true;
+                }}
+
+                public function hangupAgentCall($agentId) {{
+                    throw new RuntimeException('agent hangup should not be used when ChannelClient is known');
+                }}
+            }}
+
+            $runtime = new FakeRuntimeForCustomerChannelHangupTest();
+            echo json_encode([
+                'result' => $runtime->hangupCall('call-bridge-001', 'Agent/1'),
+                'commands' => $runtime->commands,
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["result"]["status"], "hangup_requested")
+        self.assertEqual(payload["result"]["target"], "client")
+        self.assertEqual(payload["result"]["channel"], "SIP/5571999999999-0000002a")
+        self.assertEqual(payload["commands"], ["channel request hangup SIP/5571999999999-0000002a"])
 
     def test_callcenter_bridge_runtime_agent_status_tolerates_missing_eccp_queue_socket(self) -> None:
         script = textwrap.dedent(
