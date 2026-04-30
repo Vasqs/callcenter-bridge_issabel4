@@ -314,6 +314,35 @@ class CallCenterRuntime
         return $this->eccpCall('hangup', array(), $agentId, $this->resolveAgentPassword($agentId));
     }
 
+    public function hangupCall($callId, $agentId)
+    {
+        $callId = trim((string) $callId);
+        if ($callId === '') {
+            return array(
+                'failure' => array(
+                    'code' => '422',
+                    'message' => 'Call id is required for hangup',
+                ),
+            );
+        }
+
+        $agent = $this->resolveAgentReference($agentId);
+        $currentCall = $this->findCurrentCallById($callId, $agent);
+        if (is_array($currentCall)) {
+            $clientChannel = isset($currentCall['ChannelClient']) ? trim((string) $currentCall['ChannelClient']) : '';
+            if ($clientChannel !== '') {
+                return $this->requestChannelHangup($clientChannel, array(
+                    'call_id' => $callId,
+                    'agent_id' => isset($agent['agent_id']) ? (string) $agent['agent_id'] : (string) $agentId,
+                    'channel' => $clientChannel,
+                    'target' => 'client',
+                ));
+            }
+        }
+
+        return $this->hangupAgentCall($agentId);
+    }
+
     public function originateCall($agentId, $extension, $phone, $callId)
     {
         $extension = trim((string) $extension);
@@ -456,6 +485,15 @@ class CallCenterRuntime
         }
     }
 
+    protected function execAsteriskRx($command, array &$output = null, &$exitCode = null)
+    {
+        $output = array();
+        $exitCode = 0;
+        exec('asterisk -rx ' . escapeshellarg($command) . ' 2>&1', $output, $exitCode);
+
+        return $exitCode === 0;
+    }
+
     private function pdo()
     {
         if ($this->pdo instanceof PDO) {
@@ -557,6 +595,61 @@ class CallCenterRuntime
         $exitCode = 0;
         exec($command . ' >/dev/null 2>&1', $output, $exitCode);
         return $exitCode === 0;
+    }
+
+    private function findCurrentCallById($callId, array $agent)
+    {
+        $agentId = isset($agent['agent_id']) ? (string) $agent['agent_id'] : '';
+        $agentNumber = isset($agent['number']) ? (string) $agent['number'] : '';
+        $routeKey = isset($agent['id']) ? (string) $agent['id'] : '';
+
+        $rows = $this->queryPrepared(
+            'SELECT uniqueid, queue, agentnum, event, Channel, ChannelClient FROM current_calls WHERE uniqueid = :call_id ORDER BY id DESC',
+            array(':call_id' => $callId)
+        );
+
+        foreach ($rows as $row) {
+            $agentnum = isset($row['agentnum']) ? trim((string) $row['agentnum']) : '';
+            if ($agentnum === '' || $agentnum === $agentId || $agentnum === $agentNumber || $agentnum === $routeKey) {
+                return $row;
+            }
+        }
+
+        return null;
+    }
+
+    private function requestChannelHangup($channel, array $metadata)
+    {
+        $channel = trim((string) $channel);
+        if ($channel === '' || strtolower($channel) === 'all' || preg_match('/\s/', $channel) === 1) {
+            return array(
+                'failure' => array(
+                    'code' => '422',
+                    'message' => 'Invalid channel for hangup',
+                ),
+                'channel' => $channel,
+            );
+        }
+
+        $output = array();
+        $exitCode = 0;
+        $ok = $this->execAsteriskRx('channel request hangup ' . $channel, $output, $exitCode);
+        $message = trim(implode("\n", $output));
+
+        if (!$ok) {
+            return array(
+                'failure' => array(
+                    'code' => (string) $exitCode,
+                    'message' => $message !== '' ? $message : 'Asterisk channel hangup failed',
+                ),
+                'channel' => $channel,
+            );
+        }
+
+        return array_merge($metadata, array(
+            'status' => 'hangup_requested',
+            'message' => $message,
+        ));
     }
 
     private function agentLoginChannelTimeoutMs()

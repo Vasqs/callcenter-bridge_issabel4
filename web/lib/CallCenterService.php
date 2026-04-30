@@ -625,7 +625,7 @@ class CallCenterService
             'call_id' => $callId,
             'agent_id' => $agent['agent_id'],
             'route_key' => $agent['route_key'],
-            'result' => $this->runtime->hangupAgentCall($agent['agent_id']),
+            'result' => $this->runtime->hangupCall($callId, $agent['agent_id']),
         );
     }
 
