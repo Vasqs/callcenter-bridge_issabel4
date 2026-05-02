@@ -87,6 +87,13 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertIn("/workspace/modules/callcenter_bridge/module.env", index_php)
         self.assertNotIn("dirname(__DIR__)", index_php)
 
+    def test_callcenter_bridge_api_uses_module_local_env_candidates(self) -> None:
+        api_php = (MODULE_ROOT / "web" / "api.php").read_text()
+
+        self.assertIn("__DIR__ . '/module.env'", api_php)
+        self.assertIn("/workspace/modules/callcenter_bridge/module.env", api_php)
+        self.assertNotIn("dirname(__DIR__)", api_php)
+
     def test_callcenter_bridge_config_page_loads_defaults_and_persists_env(self) -> None:
         script = textwrap.dedent(
             f"""

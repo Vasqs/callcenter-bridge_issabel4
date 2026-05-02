@@ -26,7 +26,7 @@ if (!function_exists('callcenter_bridge_hash_equals')) {
 }
 
 $moduleEnvCandidates = array(
-    dirname(__DIR__) . '/module.env',
+    __DIR__ . '/module.env',
     '/workspace/modules/callcenter_bridge/module.env',
 );
 foreach ($moduleEnvCandidates as $moduleEnvPath) {
