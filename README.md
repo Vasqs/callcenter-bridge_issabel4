@@ -69,7 +69,7 @@ Contrato padrão:
 
 - script final em `/usr/local/bin/callcenter-bridge-relay.sh`
 - timer habilitado com `systemctl enable --now callcenter-bridge-relay.timer`
-- cadence padrão de `3s`
+- cadence padrão de `1s`
 - cadence configurável via `CALLCENTER_BRIDGE_RELAY_INTERVAL_SECONDS`
 - token lido de `module.env`
 - relay local para `https://127.0.0.1/modules/callcenter_bridge/api.php/v1/events/relay`

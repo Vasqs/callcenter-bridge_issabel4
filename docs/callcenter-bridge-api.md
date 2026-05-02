@@ -201,7 +201,7 @@ Contrato padrão do instalador:
 
 - script em `/usr/local/bin/callcenter-bridge-relay.sh`
 - timer `callcenter-bridge-relay.timer`
-- frequência `OnUnitActiveSec=3s`
+- frequência `OnUnitActiveSec=1s`
 - frequência sobrescrevível via `CALLCENTER_BRIDGE_RELAY_INTERVAL_SECONDS`
 - URL local `https://127.0.0.1/modules/callcenter_bridge/api.php/v1/events/relay`
 - token carregado do `module.env` do módulo

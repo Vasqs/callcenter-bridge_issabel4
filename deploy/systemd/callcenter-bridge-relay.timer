@@ -3,7 +3,7 @@ Description=Run callcenter bridge relay periodically
 
 [Timer]
 OnBootSec=5s
-OnUnitActiveSec=3s
+OnUnitActiveSec=1s
 AccuracySec=250ms
 Unit=callcenter-bridge-relay.service
 # RELAY_INTERVAL_SECONDS can be rendered by the installer when needed.

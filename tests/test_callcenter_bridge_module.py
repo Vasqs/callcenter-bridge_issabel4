@@ -281,7 +281,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertIn("systemctl enable --now callcenter-bridge-relay.timer", install_text)
 
         self.assertIn("ExecStart=/usr/local/bin/callcenter-bridge-relay.sh", service_text)
-        self.assertIn("OnUnitActiveSec=3s", timer_text)
+        self.assertIn("OnUnitActiveSec=1s", timer_text)
         self.assertIn("callcenter-bridge-relay.service", timer_text)
         self.assertIn("CALLCENTER_BRIDGE_MODULE_ENV_PATH", relay_text)
         self.assertIn("CALLCENTER_BRIDGE_LOCAL_RELAY_URL", relay_text)

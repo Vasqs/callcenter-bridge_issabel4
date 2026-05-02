@@ -11,7 +11,7 @@ SCRIPT_SRC="${SYSTEMD_DIR}/callcenter-bridge-relay.sh.example"
 SERVICE_DST="/etc/systemd/system/callcenter-bridge-relay.service"
 TIMER_DST="/etc/systemd/system/callcenter-bridge-relay.timer"
 SCRIPT_DST="/usr/local/bin/callcenter-bridge-relay.sh"
-RELAY_INTERVAL_SECONDS="${CALLCENTER_BRIDGE_RELAY_INTERVAL_SECONDS:-3}"
+RELAY_INTERVAL_SECONDS="${CALLCENTER_BRIDGE_RELAY_INTERVAL_SECONDS:-1}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run as root." >&2
@@ -26,7 +26,7 @@ for path in "${SERVICE_SRC}" "${TIMER_SRC}" "${SCRIPT_SRC}"; do
 done
 
 install -m 0644 "${SERVICE_SRC}" "${SERVICE_DST}"
-sed "s/OnUnitActiveSec=3s/OnUnitActiveSec=${RELAY_INTERVAL_SECONDS}s/" "${TIMER_SRC}" > "${TIMER_DST}"
+sed "s/OnUnitActiveSec=1s/OnUnitActiveSec=${RELAY_INTERVAL_SECONDS}s/" "${TIMER_SRC}" > "${TIMER_DST}"
 install -m 0755 "${SCRIPT_SRC}" "${SCRIPT_DST}"
 
 systemctl daemon-reload
