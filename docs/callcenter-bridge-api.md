@@ -68,6 +68,7 @@ Observações:
   - alias sem barra como `Agent-1`, `Agent:1`, `SIP-1001`
   - o formato ECCP original `Agent/1` ou `SIP/1001` apenas quando a chamada usar `api.php?route=...`, porque a variante `api.php/v1/...` passa pelo Apache e perde a barra no path
 - `PATCH /extension` persiste o binding operacional do ramal no wrapper; esse valor é reutilizado no login se o payload não trouxer `extension`.
+- `POST /login` não espera mais de forma síncrona pelo canal técnico de confirmação; quando o runtime retorna `logging`, o bridge persiste um pending login e a confirmação vem pelo status/relay subsequente.
 
 ### Calls
 
@@ -119,6 +120,7 @@ Comportamento:
 - gera um snapshot atual de agentes e chamadas
 - produz eventos normalizados por diff
 - opcionalmente envia esses eventos para o `painel`
+- reutiliza cache curto de `campaign_context` por `agent_id + call_id` para evitar lookups repetidos entre ticks
 
 Eventos já normalizados pelo diff:
 
@@ -170,6 +172,7 @@ O módulo persiste em `CALLCENTER_BRIDGE_STATE_ROOT`:
 
 - `agent_extensions.json`
 - `last_snapshot.json`
+- `campaign_context_cache.json`
 
 Esses arquivos vivem por padrão em:
 
@@ -198,6 +201,7 @@ Contrato padrão do instalador:
 
 - script em `/usr/local/bin/callcenter-bridge-relay.sh`
 - timer `callcenter-bridge-relay.timer`
-- frequência `OnUnitActiveSec=1s`
+- frequência `OnUnitActiveSec=3s`
+- frequência sobrescrevível via `CALLCENTER_BRIDGE_RELAY_INTERVAL_SECONDS`
 - URL local `https://127.0.0.1/modules/callcenter_bridge/api.php/v1/events/relay`
 - token carregado do `module.env` do módulo

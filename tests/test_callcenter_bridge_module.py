@@ -87,6 +87,13 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertIn("/workspace/modules/callcenter_bridge/module.env", index_php)
         self.assertNotIn("dirname(__DIR__)", index_php)
 
+    def test_callcenter_bridge_api_uses_module_local_env_candidates(self) -> None:
+        api_php = (MODULE_ROOT / "web" / "api.php").read_text()
+
+        self.assertIn("__DIR__ . '/module.env'", api_php)
+        self.assertIn("/workspace/modules/callcenter_bridge/module.env", api_php)
+        self.assertNotIn("dirname(__DIR__)", api_php)
+
     def test_callcenter_bridge_config_page_loads_defaults_and_persists_env(self) -> None:
         script = textwrap.dedent(
             f"""
@@ -274,10 +281,12 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertIn("systemctl enable --now callcenter-bridge-relay.timer", install_text)
 
         self.assertIn("ExecStart=/usr/local/bin/callcenter-bridge-relay.sh", service_text)
-        self.assertIn("OnUnitActiveSec=1s", timer_text)
+        self.assertIn("OnUnitActiveSec=3s", timer_text)
         self.assertIn("callcenter-bridge-relay.service", timer_text)
         self.assertIn("CALLCENTER_BRIDGE_MODULE_ENV_PATH", relay_text)
         self.assertIn("CALLCENTER_BRIDGE_LOCAL_RELAY_URL", relay_text)
+        self.assertIn("CALLCENTER_BRIDGE_RELAY_INTERVAL_SECONDS", install_text)
+        self.assertIn("RELAY_INTERVAL_SECONDS", timer_text)
         self.assertIn("/modules/callcenter_bridge/api.php/v1/events/relay", relay_text)
         self.assertIn("CALLCENTER_BRIDGE_API_TOKEN", relay_text)
 
@@ -1003,7 +1012,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
         self.assertEqual(payload["resolved_refs"], ["route:34"])
         self.assertEqual(payload["login_calls"][0]["agent_id"], "Agent/19")
 
-    def test_callcenter_bridge_service_retries_logging_login_until_channel_exists(self) -> None:
+    def test_callcenter_bridge_service_persists_pending_login_without_waiting_for_channel(self) -> None:
         script = textwrap.dedent(
             f"""
             <?php
@@ -1011,7 +1020,7 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
             require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
             require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
 
-            class FakeRuntimeForLoginRetryTest extends CallCenterRuntime {{
+            class FakeRuntimeForPendingLoginPersistenceTest extends CallCenterRuntime {{
                 public $loginCalls = [];
                 public $channelChecks = 0;
 
@@ -1034,11 +1043,11 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
 
                 public function waitForAgentLoginChannel($extension, $timeoutMs = null) {{
                     $this->channelChecks++;
-                    return $this->channelChecks >= 2;
+                    return false;
                 }}
             }}
 
-            class FakeStoreForLoginRetryTest extends CallCenterStateStore {{
+            class FakeStoreForPendingLoginPersistenceTest extends CallCenterStateStore {{
                 public function __construct() {{}}
                 public $extensions = [];
                 public $pendingLogins = [];
@@ -1063,8 +1072,8 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
                 public function getAgentExtension($routeKey, $agentId = null) {{ return null; }}
             }}
 
-            $runtime = new FakeRuntimeForLoginRetryTest();
-            $store = new FakeStoreForLoginRetryTest();
+            $runtime = new FakeRuntimeForPendingLoginPersistenceTest();
+            $store = new FakeStoreForPendingLoginPersistenceTest();
             $service = new CallCenterService($runtime, $store);
             $response = $service->handle('agents.login', ['agentId' => '34'], ['extension' => '1001']);
 
@@ -1083,12 +1092,106 @@ class CallcenterBridgeModuleTests(unittest.TestCase):
 
         payload = json.loads(proc.stdout)
         self.assertTrue(payload["response"]["success"])
-        self.assertEqual(len(payload["login_calls"]), 2)
-        self.assertEqual(payload["channel_checks"], 2)
+        self.assertEqual(len(payload["login_calls"]), 1)
+        self.assertEqual(payload["channel_checks"], 0)
         self.assertEqual(len(payload["pending_logins"]), 1)
-        self.assertEqual(payload["response"]["result"]["bridge_login_channel_ready"], True)
-        self.assertEqual(payload["response"]["result"]["bridge_login_attempts"], 2)
+        self.assertEqual(payload["response"]["result"]["status"], "logging")
         self.assertEqual(payload["cleared"], 0)
+
+    def test_callcenter_bridge_relay_reuses_cached_campaign_context_for_adjacent_events(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            <?php
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterRuntime.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterStateStore.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterSnapshotDiffer.php")!r};
+            require_once {str(MODULE_ROOT / "web" / "lib" / "CallCenterService.php")!r};
+
+            class FakeRuntimeForCampaignCacheTest extends CallCenterRuntime {{
+                public $contextCalls = 0;
+                public function __construct() {{}}
+                public function buildSnapshot($store) {{ return ['agents' => [], 'calls' => []]; }}
+                public function getAgentCampaignContext($agentId, array $options = array()) {{
+                    $this->contextCalls++;
+                    return [
+                        'agent_id' => $agentId,
+                        'extension' => '1001',
+                        'call_id' => 'call-focus-001',
+                        'campaign_id' => '2',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'identifier_type' => 'cpf',
+                        'identifier_value' => '12345678909',
+                        'source' => 'issabel-callcenter-bridge',
+                        'resolved_from' => 'call_attribute',
+                    ];
+                }}
+            }}
+
+            class FakeStoreForCampaignCacheTest extends CallCenterStateStore {{
+                public function __construct() {{}}
+                public $cache = [];
+                public function readLastSnapshot() {{ return ['agents' => [], 'calls' => []]; }}
+                public function writeLastSnapshot($snapshot) {{ return null; }}
+                public function readFocusedCallIds() {{ return []; }}
+                public function writeFocusedCallIds($snapshot) {{ return null; }}
+                public function readPendingLogins() {{ return []; }}
+                public function persistPendingLogin($routeKey, $agentId, $extension) {{ return null; }}
+                public function getPendingLogin($routeKey, $agentId = null) {{ return null; }}
+                public function clearPendingLogin($routeKey, $agentId = null) {{ return null; }}
+                public function readCampaignContextCache() {{ return $this->cache; }}
+                public function writeCampaignContextCache(array $cache) {{ $this->cache = $cache; }}
+            }}
+
+            class FakeDifferForCampaignCacheTest extends CallCenterSnapshotDiffer {{
+                public function __construct() {{}}
+                public function diff($previous, $current, $companyKey, $previousFocusedCalls = array(), &$nextFocusedCalls = null) {{
+                    return [[
+                        'event_id' => 'evt-focus-001',
+                        'event_type' => 'call.focus',
+                        'event' => 'call.focus',
+                        'occurred_at' => '2026-04-22T12:00:00Z',
+                        'source' => 'issabel-callcenter',
+                        'company_key' => $companyKey,
+                        'agent_id' => 'Agent/99',
+                        'extension' => '1001',
+                        'call_id' => 'call-focus-001',
+                        'queue' => 'sales',
+                        'status' => 'answered',
+                        'state' => 'answered',
+                        'direction' => 'outbound',
+                        'phone' => '71999998888',
+                        'remote_number' => '71999998888',
+                        'mode' => 'agent-fallback',
+                        'payload' => [],
+                    ]];
+                }}
+            }}
+
+            $runtime = new FakeRuntimeForCampaignCacheTest();
+            $store = new FakeStoreForCampaignCacheTest();
+            $service = new CallCenterService($runtime, $store, new FakeDifferForCampaignCacheTest());
+
+            $relay1 = $service->handle('events.relay', [], ['company_key' => 'demo']);
+            $relay2 = $service->handle('events.relay', [], ['company_key' => 'demo']);
+
+            echo json_encode([
+                'context_calls' => $runtime->contextCalls,
+                'cache' => $store->cache,
+                'relay1' => $relay1,
+                'relay2' => $relay2,
+            ], JSON_UNESCAPED_SLASHES);
+            """
+        )
+
+        proc = self.run_php(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["context_calls"], 1)
+        self.assertEqual(len(payload["cache"]), 1)
+        self.assertEqual(payload["relay1"]["events"][0]["campaign_context"]["call_id"], "call-focus-001")
+        self.assertEqual(payload["relay2"]["events"][0]["campaign_context"]["identifier_value"], "12345678909")
 
     def test_callcenter_bridge_service_falls_back_to_plain_numeric_when_route_lookup_is_missing(self) -> None:
         script = textwrap.dedent(
