@@ -149,6 +149,18 @@ class CallCenterStateStore
         $this->writeJsonFile($this->stateRoot . '/pending_logins.json', $pending);
     }
 
+    public function readCampaignContextCache()
+    {
+        $data = $this->readJsonFile($this->stateRoot . '/campaign_context_cache.json');
+
+        return is_array($data) ? $data : array();
+    }
+
+    public function writeCampaignContextCache(array $cache)
+    {
+        $this->writeJsonFile($this->stateRoot . '/campaign_context_cache.json', $cache);
+    }
+
     private function readJsonFile($path)
     {
         if (!is_file($path)) {

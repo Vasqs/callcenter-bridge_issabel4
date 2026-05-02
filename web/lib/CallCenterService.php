@@ -85,24 +85,10 @@ class CallCenterService
         }
 
         $this->store->persistAgentExtension($agent['route_key'], $agent['agent_id'], $extension);
-        $result = $this->loginAgentWithConfirmationRetry($agent['agent_id'], $extension);
+        $result = $this->runtime->loginAgent($agent['agent_id'], $extension);
 
         if ($this->isPendingLoginResult($result)) {
-            if (isset($result['bridge_login_channel_ready']) && $result['bridge_login_channel_ready']) {
-                $this->store->persistPendingLogin($agent['route_key'], $agent['agent_id'], $extension);
-            } else {
-                $this->store->clearPendingLogin($agent['route_key'], $agent['agent_id']);
-
-                return array(
-                    'status' => 503,
-                    'success' => false,
-                    'agent_id' => $agent['agent_id'],
-                    'route_key' => $agent['route_key'],
-                    'result' => $result,
-                    'extension' => $extension,
-                    'message' => 'agent login confirmation call was not originated',
-                );
-            }
+            $this->store->persistPendingLogin($agent['route_key'], $agent['agent_id'], $extension);
         } else {
             $this->store->clearPendingLogin($agent['route_key'], $agent['agent_id']);
         }
@@ -114,41 +100,6 @@ class CallCenterService
             'result' => $result,
             'extension' => $extension,
         );
-    }
-
-    private function loginAgentWithConfirmationRetry($agentId, $extension)
-    {
-        $attempts = $this->loginConfirmationAttempts();
-        $lastResult = null;
-
-        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
-            $lastResult = $this->runtime->loginAgent($agentId, $extension);
-            if (!$this->isPendingLoginResult($lastResult)) {
-                return $lastResult;
-            }
-
-            if ($this->runtime->waitForAgentLoginChannel($extension)) {
-                $lastResult['bridge_login_channel_ready'] = true;
-                $lastResult['bridge_login_attempts'] = $attempt;
-
-                return $lastResult;
-            }
-        }
-
-        if (is_array($lastResult)) {
-            $lastResult['bridge_login_channel_ready'] = false;
-            $lastResult['bridge_login_attempts'] = $attempts;
-        }
-
-        return $lastResult;
-    }
-
-    private function loginConfirmationAttempts()
-    {
-        $value = getenv('CALLCENTER_BRIDGE_LOGIN_CONFIRMATION_ATTEMPTS');
-        $attempts = ($value !== false && $value !== '') ? (int) $value : 3;
-
-        return max(1, min(5, $attempts));
     }
 
     private function isPendingLoginResult($result)
@@ -247,6 +198,7 @@ class CallCenterService
 
     private function relay(CallCenterSnapshotDiffer $differ, array $payload)
     {
+        $startedAt = microtime(true);
         $companyKey = isset($payload['company_key']) ? trim((string) $payload['company_key']) : 'default';
         $webhookUrl = isset($payload['webhook_url']) ? trim((string) $payload['webhook_url']) : trim((string) getenv('CALLCENTER_BRIDGE_PANEL_WEBHOOK_URL'));
         $webhookToken = isset($payload['webhook_token']) ? trim((string) $payload['webhook_token']) : trim((string) getenv('CALLCENTER_BRIDGE_PANEL_WEBHOOK_TOKEN'));
@@ -259,11 +211,14 @@ class CallCenterService
         $previousFocusedCalls = method_exists($this->store, 'readFocusedCallIds')
             ? $this->store->readFocusedCallIds()
             : array();
+        $campaignContextCache = method_exists($this->store, 'readCampaignContextCache')
+            ? $this->store->readCampaignContextCache()
+            : array();
         $nextFocusedCalls = array();
         $events = $differ->diff($previous, $current, $companyKey, is_array($previousFocusedCalls) ? $previousFocusedCalls : array(), $nextFocusedCalls);
-        $events = $this->appendSyntheticFocusEvents($events, $current, $companyKey, $payload, is_array($previousFocusedCalls) ? $previousFocusedCalls : array(), $nextFocusedCalls);
+        $events = $this->appendSyntheticFocusEvents($events, $current, $companyKey, $payload, is_array($previousFocusedCalls) ? $previousFocusedCalls : array(), $nextFocusedCalls, $campaignContextCache);
         $events = $this->suppressStaleHangupEvents($events, $current);
-        $events = $this->enrichRelayEventsWithCampaignContext($events, $payload);
+        $events = $this->enrichRelayEventsWithCampaignContext($events, $payload, $campaignContextCache, true);
 
         $delivered = null;
         if ($webhookUrl !== '' && count($events) > 0) {
@@ -285,12 +240,27 @@ class CallCenterService
                 $this->store->writeFocusedCallIds(is_array($nextFocusedCalls) ? $nextFocusedCalls : array());
             }
         }
+        if (method_exists($this->store, 'writeCampaignContextCache')) {
+            try {
+                $this->store->writeCampaignContextCache($this->pruneCampaignContextCache($campaignContextCache));
+            } catch (Exception $e) {
+                // Some tests use in-memory fake stores without a state root.
+            }
+        }
+
+        $timings = array(
+            'total_ms' => $this->elapsedMs($startedAt),
+            'events' => count($events),
+            'delivered' => is_array($delivered) ? (int) (isset($delivered['status']) ? $delivered['status'] : 0) : null,
+        );
+        $this->logRelayTiming($timings);
 
         return array(
             'success' => true,
             'events' => $events,
             'delivered' => $delivered,
             'persisted' => $shouldPersist,
+            'timings' => $timings,
         );
     }
 
@@ -312,7 +282,7 @@ class CallCenterService
         );
     }
 
-    private function enrichRelayEventsWithCampaignContext(array $events, array $payload)
+    private function enrichRelayEventsWithCampaignContext(array $events, array $payload, array &$campaignContextCache, $allowLookup)
     {
         if (count($events) === 0) {
             return $events;
@@ -335,11 +305,7 @@ class CallCenterService
                 continue;
             }
 
-            try {
-                $context = $this->runtime->getAgentCampaignContext($agentId, $options);
-            } catch (Exception $e) {
-                $context = null;
-            }
+            $context = $this->resolveCampaignContext($agentId, $event, $options, $campaignContextCache, $allowLookup);
 
             if (!is_array($context)) {
                 continue;
@@ -374,7 +340,7 @@ class CallCenterService
         );
     }
 
-    private function appendSyntheticFocusEvents(array $events, array $current, $companyKey, array $payload, array $previousFocusedCalls, array &$nextFocusedCalls)
+    private function appendSyntheticFocusEvents(array $events, array $current, $companyKey, array $payload, array $previousFocusedCalls, array &$nextFocusedCalls, array &$campaignContextCache)
     {
         $agents = isset($current['agents']) && is_array($current['agents']) ? $current['agents'] : array();
         if (count($agents) === 0) {
@@ -411,11 +377,7 @@ class CallCenterService
                 continue;
             }
 
-            try {
-                $context = $this->runtime->getAgentCampaignContext($agentId, $options);
-            } catch (Exception $e) {
-                $context = null;
-            }
+            $context = $this->resolveCampaignContext($agentId, array('call_id' => null), $options, $campaignContextCache, true);
 
             if (!is_array($context)) {
                 continue;
@@ -745,5 +707,107 @@ class CallCenterService
             'body' => $body,
             'error' => $error !== '' ? $error : null,
         );
+    }
+
+    private function resolveCampaignContext($agentId, array $event, array $options, array &$campaignContextCache, $allowLookup)
+    {
+        $cacheKey = $this->campaignContextCacheKey($agentId, isset($event['call_id']) ? $event['call_id'] : null);
+        if ($cacheKey !== null && isset($campaignContextCache[$cacheKey]) && is_array($campaignContextCache[$cacheKey])) {
+            $cached = $campaignContextCache[$cacheKey];
+            $expiresAt = isset($cached['expires_at']) ? strtotime((string) $cached['expires_at']) : false;
+            if ($expiresAt !== false && $expiresAt >= time() && isset($cached['context']) && is_array($cached['context'])) {
+                return $cached['context'];
+            }
+        }
+
+        if (!$allowLookup) {
+            return null;
+        }
+
+        try {
+            $context = $this->runtime->getAgentCampaignContext($agentId, $options);
+        } catch (Exception $e) {
+            $context = null;
+        }
+
+        if (!is_array($context)) {
+            return null;
+        }
+
+        $cacheKey = $this->campaignContextCacheKey(
+            $agentId,
+            isset($context['call_id']) ? $context['call_id'] : (isset($event['call_id']) ? $event['call_id'] : null)
+        );
+        if ($cacheKey !== null) {
+            $campaignContextCache[$cacheKey] = array(
+                'expires_at' => gmdate('c', time() + $this->campaignContextCacheTtlSeconds()),
+                'context' => $context,
+            );
+        }
+
+        return $context;
+    }
+
+    private function campaignContextCacheKey($agentId, $callId)
+    {
+        $agentId = trim((string) $agentId);
+        $callId = trim((string) $callId);
+        if ($agentId === '') {
+            return null;
+        }
+
+        return $agentId . '|' . $callId;
+    }
+
+    private function campaignContextCacheTtlSeconds()
+    {
+        $value = getenv('CALLCENTER_BRIDGE_CAMPAIGN_CONTEXT_CACHE_TTL_SECONDS');
+        $ttl = ($value !== false && $value !== '') ? (int) $value : 15;
+
+        return max(1, min(300, $ttl));
+    }
+
+    private function pruneCampaignContextCache(array $campaignContextCache)
+    {
+        $active = array();
+        $now = time();
+        foreach ($campaignContextCache as $cacheKey => $item) {
+            if (!is_array($item) || !isset($item['context']) || !is_array($item['context'])) {
+                continue;
+            }
+
+            $expiresAt = isset($item['expires_at']) ? strtotime((string) $item['expires_at']) : false;
+            if ($expiresAt === false || $expiresAt < $now) {
+                continue;
+            }
+
+            $active[$cacheKey] = $item;
+        }
+
+        return $active;
+    }
+
+    private function elapsedMs($startedAt)
+    {
+        return round((microtime(true) - $startedAt) * 1000, 2);
+    }
+
+    private function logRelayTiming(array $timings)
+    {
+        if (!$this->relayTimingLogEnabled()) {
+            return;
+        }
+
+        error_log('[callcenter_bridge][relay] ' . json_encode($timings));
+    }
+
+    private function relayTimingLogEnabled()
+    {
+        $value = getenv('CALLCENTER_BRIDGE_LOG_RELAY_TIMINGS');
+        if ($value === false || $value === '') {
+            return false;
+        }
+
+        return !in_array(strtolower((string) $value), array('0', 'false', 'no', 'off'), true);
     }
 }

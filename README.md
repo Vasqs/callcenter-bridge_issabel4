@@ -69,7 +69,8 @@ Contrato padrão:
 
 - script final em `/usr/local/bin/callcenter-bridge-relay.sh`
 - timer habilitado com `systemctl enable --now callcenter-bridge-relay.timer`
-- cadence padrão de `1s`
+- cadence padrão de `3s`
+- cadence configurável via `CALLCENTER_BRIDGE_RELAY_INTERVAL_SECONDS`
 - token lido de `module.env`
 - relay local para `https://127.0.0.1/modules/callcenter_bridge/api.php/v1/events/relay`
 
@@ -77,7 +78,9 @@ Contrato padrão:
 
 - O wrapper usa ECCP quando disponível no runtime Issabel.
 - O `ramal` persistido pelo wrapper é um binding operacional para login/originate; não altera o schema nativo do callcenter.
+- O login de agente não bloqueia mais esperando a confirmação do canal; o bridge persiste o estado pendente e expõe `status=logging` até a reconciliação posterior.
 - O bridge não habilita nem gerencia WebRTC de navegador no Issabel.
 - O papel do bridge é API/webhook operacional para callcenter, estado de agente e compatibilidade com o PBX legado.
 - O endpoint `campaign-context` expõe contexto estruturado de campanha para o painel sem vazar nomes internos do CRM.
-- O relay pode enriquecer eventos `call.focus` e `call.answered` com `campaign_context`; integrações legadas por `External URL` continuam como fallback.
+- O relay pode enriquecer eventos `call.focus` e `call.answered` com `campaign_context`; esse contexto agora usa cache curto para evitar lookups repetidos entre ticks adjacentes.
+- `CALLCENTER_BRIDGE_LOG_RELAY_TIMINGS=1` habilita telemetria simples do relay no log do PHP.

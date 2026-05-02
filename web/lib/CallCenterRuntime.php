@@ -3,10 +3,12 @@
 class CallCenterRuntime
 {
     private $pdo;
+    private $agentIndex;
 
     public function __construct()
     {
         $this->pdo = null;
+        $this->agentIndex = null;
     }
 
     public function health()
@@ -21,7 +23,7 @@ class CallCenterRuntime
     public function listAgents()
     {
         $agents = array();
-        $rows = $this->query('SELECT id, type, number, name, estatus FROM agent ORDER BY number ASC');
+        $rows = $this->agentRows();
         foreach ($rows as $row) {
             $agentId = $row['type'] . '/' . $row['number'];
             $status = $this->safeAgentStatus($agentId);
@@ -95,7 +97,7 @@ class CallCenterRuntime
             $knownCallIds[$callId] = true;
         }
 
-        foreach ($this->listAgents() as $agent) {
+        foreach ($this->basicAgents() as $agent) {
             $fallbackCall = $this->findEccpCampaignCallForAgent($agent);
             if (!is_array($fallbackCall)) {
                 continue;
@@ -419,12 +421,29 @@ class CallCenterRuntime
 
     public function buildSnapshot(CallCenterStateStore $store)
     {
+        $activeCalls = $this->listActiveCalls();
+        $activeStatusByAgent = array();
+        foreach ($activeCalls as $call) {
+            if (!is_array($call)) {
+                continue;
+            }
+
+            $agentId = isset($call['agent_id']) ? trim((string) $call['agent_id']) : '';
+            if ($agentId === '') {
+                continue;
+            }
+
+            $callStatus = strtolower(trim((string) (isset($call['status']) ? $call['status'] : '')));
+            if ($callStatus === 'answered' || $callStatus === 'ringing' || $callStatus === 'hold') {
+                $activeStatusByAgent[$agentId] = 'oncall';
+            }
+        }
+
         $agents = array();
-        foreach ($this->listAgents() as $agent) {
+        foreach ($this->basicAgents() as $agent) {
             $agentId = isset($agent['agent_id']) ? (string) $agent['agent_id'] : '';
             $routeKey = isset($agent['route_key']) ? (string) $agent['route_key'] : '';
-            $status = $this->getAgentStatus($agentId);
-            $effectiveStatus = isset($status['status']) ? (string) $status['status'] : 'unknown';
+            $effectiveStatus = isset($activeStatusByAgent[$agentId]) ? $activeStatusByAgent[$agentId] : 'offline';
             $pending = $store->getPendingLogin($routeKey, $agentId);
             if (is_array($pending)) {
                 $startedAt = isset($pending['started_at']) ? strtotime((string) $pending['started_at']) : false;
@@ -439,12 +458,12 @@ class CallCenterRuntime
             $agents[$agentId] = array(
                 'status' => $effectiveStatus,
                 'extension' => $store->getAgentExtension($routeKey, $agentId),
-                'queue' => is_array($status['queues']) ? json_encode($status['queues']) : null,
+                'queue' => null,
             );
         }
 
         $calls = array();
-        foreach ($this->listActiveCalls() as $call) {
+        foreach ($activeCalls as $call) {
             $callId = isset($call['call_id']) ? (string) $call['call_id'] : '';
             $calls[$callId] = array(
                 'status' => isset($call['status']) ? (string) $call['status'] : 'unknown',
@@ -460,6 +479,35 @@ class CallCenterRuntime
             'agents' => $agents,
             'calls' => $calls,
         );
+    }
+
+    protected function basicAgents()
+    {
+        $agents = array();
+        foreach ($this->agentRows() as $row) {
+            $agents[] = array(
+                'agent_id' => $row['type'] . '/' . $row['number'],
+                'route_key' => (string) $row['id'],
+                'id' => (int) $row['id'],
+                'type' => (string) $row['type'],
+                'number' => (string) $row['number'],
+                'name' => (string) $row['name'],
+                'enabled' => ((string) $row['estatus']) === 'A',
+            );
+        }
+
+        return $agents;
+    }
+
+    protected function agentRows()
+    {
+        if (is_array($this->agentIndex)) {
+            return $this->agentIndex;
+        }
+
+        $this->agentIndex = $this->query('SELECT id, type, number, name, estatus FROM agent ORDER BY number ASC');
+
+        return is_array($this->agentIndex) ? $this->agentIndex : array();
     }
 
     protected function query($sql)
