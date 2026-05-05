@@ -91,6 +91,54 @@ Observações:
 - o originate usa ECCP `schedulecall` com o mesmo agente como alvo operacional
 - o hangup usa ECCP `hangup` e requer `agent_id` no corpo
 
+### Falhas de trunk/campanha antes da fila
+
+Backlog para o bridge: classificar e expor falhas de origem que acontecem antes
+de a chamada entrar na fila e antes de qualquer entrega ao agente. Essas falhas
+devem ser tratadas como problema de tronco, rota, provedor ou discador, não como
+falha da voice-bar.
+
+Assinatura operacional observada em produção em 2026-05-05:
+
+- campanha `fullconsig` (`id=4`) ativa em `context=from-internal`, fila `500`
+- rota `outrt-2` usando o tronco `SIP/saida_89`
+- `sip show peer saida_89` retornando `OK`
+- provedor `181.191.206.44` respondendo `SIP/2.0 402 Payment Required`
+- cabeçalho `Reason: Q.850;cause=21;text="Call Rejected"`
+- `call_center.calls.failure_cause=127`
+- `call_center.calls.failure_cause_txt=Interworking, unspecified`
+- nenhum `CONNECT` correspondente no `queue_log` para o agente
+
+Comportamento desejado para implementação futura:
+
+- ler `call_center.calls.failure_cause`, `failure_cause_txt`, `datetime_originate`
+  e `trunk` quando não houver chamada ativa de campanha para o agente
+- quando disponível, correlacionar a tentativa com a resposta SIP/Q.850 do
+  Asterisk ou do log de origem
+- emitir uma classificação estável, por exemplo `provider_payment_required`,
+  `provider_rejected`, `trunk_unavailable` ou `all_circuits_busy`
+- expor a falha em endpoint/evento separado ou no contexto de campanha degradado
+- evitar que painel, voice-bar ou agente sejam marcados como causa da falha
+- sugerir alerta operacional ou pausa automática da campanha após limiar de
+  falhas consecutivas no mesmo tronco/provedor
+
+Exemplo de payload esperado:
+
+```json
+{
+  "success": true,
+  "status": "failed_before_queue",
+  "failure": {
+    "stage": "trunk_origination",
+    "trunk": "SIP/saida_89",
+    "sip_status": 402,
+    "q850_cause": 21,
+    "asterisk_failure_cause": 127,
+    "message": "provider_payment_required"
+  }
+}
+```
+
 ### Queues
 
 - `GET /v1/queues`
